@@ -258,10 +258,8 @@ def replacements(project, state):
             require(len(fmt.text_entries(raw)[1]) == 129, 'Trainer class name count differs', 'BEFORE_VALUE_MISMATCH')
             result[fmt.TEXT_ARCHIVE][member] = fmt.append_messages(raw, [label]*len(chars), limit=65535)
     if trainers:
-        from . import battle_safety
-        result[battle_safety.EFFECT_ARCHIVE] = {
-            battle_safety.ATTACK_DOWN: battle_safety.attack_down_effect(
-                resource(project.blob, battle_safety.EFFECT_ARCHIVE, battle_safety.ATTACK_DOWN)[1])}
+        # The r27 Attack-down bypass is superseded by runtime()'s overlay repairs,
+        # which restore the native limit message for every stat.
         raw = resource(project.blob, fmt.TEXT_ARCHIVE, 729)[1]
         require(len(fmt.text_entries(raw)[1]) == 738, 'Trainer name count differs', 'BEFORE_VALUE_MISMATCH')
         result[fmt.TEXT_ARCHIVE][729] = fmt.append_messages(raw, [t['name'] for t in trainers.values()], limit=65535)
@@ -284,6 +282,11 @@ def runtime(project, state):
             data.append(struct.pack('<BHB4HIB3x', 0, c, len(t['party']), 0, 0, 0, 0, 0, 0))
             parties.append(b''.join(struct.pack('<BB3H', 0, 0, m['level'], m['species'], 0) for m in t['party']))
         plan['appends'][TRAINER_ARCHIVE] = data; plan['appends'][PARTY_ARCHIVE] = parties
+        # Battles need the capped-stat loop (002) and lower-clamp (003) repairs.
+        from . import battle_safety
+        for ovy, repair in ((137, battle_safety.stat_stage_overlay), (142, battle_safety.before_move_overlay)):
+            info = cr.overlay(project.blob, ovy)
+            plan['files'][info['file_id']] = repair(info['data'])
     return plan
 
 

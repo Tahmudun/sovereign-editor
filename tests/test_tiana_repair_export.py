@@ -10,7 +10,7 @@ import pytest
 
 from sovereign_editor.core import Project
 from sovereign_editor.formats import EditorError, digest
-from sovereign_editor import battle_safety as safety, dialogue_format as fmt, event_authoring as ev, story_authoring as story
+from sovereign_editor import battle_safety as safety, character_runtime as cr, dialogue_format as fmt, event_authoring as ev, story_authoring as story
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,19 +42,25 @@ def test_repair_export_preservation_noop_stale_undo_redo(tmp_path):
     out = tmp_path/'first'; p.export(out,27,save)
     raw = (out/'game.nds').read_bytes();rom = ndspy.rom.NintendoDSRom(raw)
     prior = ndspy.rom.NintendoDSRom((ROOT/'projects/tiana-events-1/exports/tiana-r26/game.nds').read_bytes())
-    allowed = {'a/0/1/2':856,'a/0/2/7':555,'a/0/3/2':69,safety.EFFECT_ARCHIVE:18}
+    allowed = {'a/0/1/2':856,'a/0/2/7':555,'a/0/3/2':69}
+    # Battle repairs replace whole overlay files (002 before-move, 003 stat clamp).
+    overlays = {cr.overlay(p.blob, i)['file_id']: repair(cr.overlay(p.blob, i)['data'])
+                for i, repair in ((137, safety.stat_stage_overlay), (142, safety.before_move_overlay))}
     changed = []
     for fid,(old,new) in enumerate(zip(prior.files,rom.files)):
         if old == new: continue
+        if fid in overlays:
+            assert new == overlays[fid]; changed.append(fid); continue
         name = prior.filenames.filenameOf(fid); assert name in allowed, name
         changed.append(name)
         a,b = ndspy.narc.NARC(old).files,ndspy.narc.NARC(new).files
         assert len(a)==len(b)
         assert [i for i,(x,y) in enumerate(zip(a,b)) if x!=y] == [allowed[name]]
-    assert set(changed) == set(allowed)
+    assert set(changed) == set(allowed) | set(overlays)
     assert prior.arm9 == rom.arm9
     def member(r,path,n): return ndspy.narc.NARC(r.getFileByName(path)).files[n]
-    assert member(rom,safety.EFFECT_ARCHIVE,18) == safety.attack_down_effect(safety.ORIGINAL)
+    # The r27 Attack-down bypass is no longer installed; the native limit message returns.
+    assert member(rom,safety.EFFECT_ARCHIVE,18) == safety.ORIGINAL
     oldevents = ev.records(member(prior,'a/0/3/2',69));events = ev.records(member(rom,'a/0/3/2',69))
     assert [r['id'] for r in events if r['kind']=='npc'] == [0,1,57]
     for r in oldevents:
@@ -80,4 +86,5 @@ def test_repair_export_preservation_noop_stale_undo_redo(tmp_path):
             'changed_members':allowed,'arm9_exact_to_r26':True,'stock_residents_exact':True,
             'repeat_exact':True,'undo_resident_restored':True,'redo_exact':True,
             'preview_noop_readonly':True,'stale_tamper_refused':True,'original_project_exact':True}
-    (ROOT/'evidence/tiana-fixes-1/export-verification.json').write_text(json.dumps(report,indent=2)+'\n')
+    # The delivered r27 evidence is historical; never rewrite it from a later code state.
+    (tmp_path/'export-verification.json').write_text(json.dumps(report,indent=2)+'\n')
