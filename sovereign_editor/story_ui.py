@@ -135,17 +135,21 @@ class StoryEditor(QDialog):
         self.movement=QComboBox()
         for key,name in npc_behavior.BEHAVIORS.items():self.movement.addItem(name,key)
         f.addRow('Movement',self.movement);ranges=QHBoxLayout();self.range_x=spin(0,8);self.range_z=spin(0,8);ranges.addWidget(QLabel('X ±'));ranges.addWidget(self.range_x);ranges.addWidget(QLabel('Z ±'));ranges.addWidget(self.range_z);f.addRow('Movement range',ranges)
+        self.event_form=f
         self.once=QComboBox();f.addRow('One-time state',self.once)
         self.scene_state=QComboBox();f.addRow('Quest stage state',self.scene_state)
         self.scene_values=QLineEdit();self.scene_values.setPlaceholderText('NPC: 1, 2, 3 · step-on: one value');f.addRow('Active stage values',self.scene_values)
         extent=QHBoxLayout();self.trigger_width=spin(1,9,1);self.trigger_height=spin(1,9,1)
         extent.addWidget(QLabel('Width'));extent.addWidget(self.trigger_width);extent.addWidget(QLabel('Height'));extent.addWidget(self.trigger_height);f.addRow('Step-on rectangle',extent)
+        # Rows that only apply to one trigger kind; entry_fields shows the relevant ones.
+        self.npc_rows=[self.event_character,self.facing,self.movement,ranges];self.trigger_rows=[extent]
+        self.entry.currentIndexChanged.connect(self.entry_fields);self.entry_fields()
         self.steps=QListWidget();self.steps.setFixedHeight(110);self.steps.currentRowChanged.connect(self.load_step);l.addWidget(self.steps)
         row=QHBoxLayout();self.step_type=QComboBox();self.step_type.addItems(['say','choice','if','set','battle','move','gather','face','reaction','wait','sound','give_item','take_item','has_item','give_mon','sync','end']);row.addWidget(self.step_type)
         add=QPushButton('Add step');add.clicked.connect(self.add_step);row.addWidget(add);remove=QPushButton('Remove step');remove.clicked.connect(self.remove_step);row.addWidget(remove);l.addLayout(row)
-        sf=QFormLayout();l.addLayout(sf);self.step_id=QLineEdit();sf.addRow('Step name',self.step_id)
+        sf=QFormLayout();l.addLayout(sf);self.step_form=sf;self.step_id=QLineEdit();sf.addRow('Step name',self.step_id)
         self.step_pages=QPlainTextEdit();self.step_pages.setMaximumHeight(85);self.step_pages.setPlaceholderText('Two lines ×28 characters per page; separate pages with ---. Highlight with [hint]text[/hint].');sf.addRow('Dialogue pages',self.step_pages)
-        self.step_state=QComboBox();self.step_value=spin(0,65535);sr=QHBoxLayout();sr.addWidget(self.step_state);sr.addWidget(self.step_value);sf.addRow('State / value',sr)
+        self.step_state=QComboBox();self.step_value=spin(0,65535);sr=QHBoxLayout();sr.addWidget(self.step_state);sr.addWidget(self.step_value);sf.addRow('State / value',sr);self.step_state_row=sr
         self.step_trainer=QComboBox();self.step_partner=QComboBox();self.step_opponent2=QComboBox();sf.addRow('Opponent',self.step_trainer);sf.addRow('Ally (optional)',self.step_partner);sf.addRow('Second opponent',self.step_opponent2)
         self.scene_form=QFormLayout();l.addLayout(self.scene_form)
         self.step_actor=QComboBox();self.step_actor.setEditable(True)
@@ -168,13 +172,23 @@ class StoryEditor(QDialog):
         update=QPushButton('Save selected step');update.clicked.connect(lambda:self.guard(self.save_step));l.addWidget(update)
         self.step_type.currentIndexChanged.connect(self.step_fields);self.step_fields()
         row=QHBoxLayout();save=QPushButton('Preview event');save.clicked.connect(lambda:self.guard(self.stage_event));row.addWidget(save)
-        delete=QPushButton('Preview event removal');delete.clicked.connect(lambda:self.guard(lambda:self.stage('sequence',self.event_key.text().strip(),None,'delete')));row.addWidget(delete);l.addLayout(row);return w
+        delete=QPushButton('Preview event removal');delete.clicked.connect(lambda:self.guard(lambda:self.stage('sequence',self.event_key.text().strip(),None,'delete')));row.addWidget(delete);l.addLayout(row);l.addStretch(1);return w
+
+    def entry_fields(self,*_):
+        npc=self.entry.currentIndex()==0
+        for row in self.npc_rows:self.event_form.setRowVisible(row,npc)
+        for row in self.trigger_rows:self.event_form.setRowVisible(row,not npc)
 
     def step_fields(self,*_):
         op=self.step_type.currentText()
         self.step_pages.setEnabled(op in ('say','choice'));self.step_state.setEnabled(op in ('if','set'));self.step_value.setEnabled(op in ('if','set'))
         for c in (self.step_trainer,self.step_partner,self.step_opponent2):c.setEnabled(op=='battle')
         self.next_step.setEnabled(op!='end');self.no_step.setEnabled(op in ('choice','if','battle','give_item','take_item','has_item','give_mon'));self.complete.setEnabled(op=='end')
+        # Show only the rows the selected step type uses, like the scene rows below.
+        for row,on in ((self.step_pages,self.step_pages.isEnabled()),(self.step_state_row,op in ('if','set')),
+                       (self.step_trainer,op=='battle'),(self.step_partner,op=='battle'),(self.step_opponent2,op=='battle'),
+                       (self.next_step,op!='end'),(self.no_step,self.no_step.isEnabled()),(self.complete,op=='end')):
+            self.step_form.setRowVisible(row,on)
         for _,widget,ops in self.scene_fields:self.scene_form.setRowVisible(widget,op in ops)
 
     def add_step(self):
@@ -235,7 +249,7 @@ class StoryEditor(QDialog):
         self.trigger_width.setValue(condition.get('width',1));self.trigger_height.setValue(condition.get('height',1));self.refresh_steps()
     def stage_event(self):
         self.save_step();kind='npc' if self.entry.currentIndex()==0 else 'trigger'
-        value=dict(kind=kind,x=self.x.value(),z=self.z.value(),donor_id=self.donor.value(),facing=self.facing.currentIndex(),movement=self.movement.currentData() if kind=='npc' else 0,
+        value=dict(kind=kind,x=self.x.value(),z=self.z.value(),donor_id=self.donor.value(),facing=self.facing.currentIndex() if kind=='npc' else 0,movement=self.movement.currentData() if kind=='npc' else 0,
             range_x=self.range_x.value() if kind=='npc' else 0,range_z=self.range_z.value() if kind=='npc' else 0,character=self.event_character.currentData() if kind=='npc' else None,nodes=self.nodes,once_state=self.once.currentData())
         if value['character']=='#scyther':value.update(character=None,stock_sprite=552)
         if self.scene_state.currentData():
