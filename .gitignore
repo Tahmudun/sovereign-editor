@@ -1,0 +1,152 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.nds
+*.sav
+projects/
+evidence/
+*.log
+.DS_Store
+work/
+build/
+.cloud-state/
+cloud-return/
+.claude/settings.local.json
+
+# Publication guardrails (2026-09-30).
+# These rules do NOT remove files already tracked, or purge historical blobs.
+# Never force-add excluded material without a separate content/provenance review.
+
+# Credentials and machine-local configuration; example files must use dummy values.
+.env
+.env.*
+*.env
+*.env.*
+!.env.example
+!.env.template
+!*.env.example
+!*.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.p8
+id_rsa*
+id_ed25519*
+credentials.json
+client_secret*.json
+.npmrc
+.pypirc
+.aws/
+.ssh/
+secrets/
+.claude/
+.codex/
+
+# ROMs, saves, dumps and generated patch/transfer payloads (including backups).
+*.[nN][dD][sS]
+*.[nN][dD][sS].*
+*.srl
+*.rom
+*.gba
+*.gbc
+*.[sS][aA][vV]
+*.[sS][aA][vV].*
+*.dsv
+*.srm
+*.state
+*.state.*
+*.ss[0-9]
+*.ml[0-9]
+*.ips
+*.ups
+*.bps
+*.xdelta
+*.xdelta3
+roms/
+saves/
+exports/
+extracted/
+dumps/
+
+# Native game resource dumps. Keep authored C/Python/Lua source reviewable.
+*.[nN][aA][rR][cC]
+*.[nN][sS][bB][mM][dD]
+*.[nN][sS][bB][tT][xX]
+*.[bB][tT][xX]0
+*.[nN][cC][gG][rR]
+*.[nN][cC][lL][rR]
+*.[nN][cC][eE][rR]
+*.[nN][aA][nN][rR]
+*.sdat
+*.bin
+
+# Archives may contain ROMs, saves, references or private transfer history.
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.*
+*.tgz
+*.gz
+*.zst
+*.bundle
+
+# Local art, personal references and cloud-transfer fixtures are not public assets.
+/artifacts/
+/references/sovereign-gold/
+/cloud/
+/Codex Image*.png
+/preservation-before.json
+/sovereign_editor/assets/cherrygrove/*.png
+/sovereign_editor/assets/cherrygrove/*.glb
+/sovereign_editor/assets/repairs/
+/sovereign_editor/assets/effects/
+# Derived upstream catalogs need provenance review before publication.
+/sovereign_editor/assets/engine-catalog.json
+/sovereign_editor/assets/script-opcodes.json
+# This fixture embeds sprite/preview payloads in JSON, not only metadata.
+/tests/fixtures/tiana.character.json
+
+# Environments, caches, test reports and generated distributables.
+venv/
+env/
+node_modules/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit*.xml
+dist/
+*.py[cod]
+*.whl
+*.app/
+*.dmg
+*.pkg
+*.dSYM/
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+*.a
+*.prof
+*.sqlite
+*.sqlite3
+*.db
+*.tmp
+*.bak
+*~
+
+# Local agent agreements, session history and private research notes.
+# Public documentation is allowlisted after review; tracked docs still need cleanup.
+/AGENTS.md
+/CLAUDE.md
+/docs/*
+!/docs/DEVELOPMENT.md

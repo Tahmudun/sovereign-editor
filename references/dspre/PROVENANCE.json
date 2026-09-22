@@ -1,0 +1,43 @@
+{
+  "upstream": "https://github.com/DS-Pokemon-Rom-Editor/DSPRE",
+  "commit": "249a278186d80c35f04485b2c1b612bd81b90a74",
+  "license": "AGPL-3.0; see LICENSE",
+  "status": "unmodified reference source, not yet ported into product",
+  "files": [
+    {
+      "path": "DS_Map/ROMFiles/AreaData.cs",
+      "sha256": "7336791a9ad9ca9e674352716fcd4ca1750663dbdc24b95a20cbc28a738097d0",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/DS_Map/ROMFiles/AreaData.cs"
+    },
+    {
+      "path": "DS_Map/ROMFiles/GameMatrix.cs",
+      "sha256": "44bf546672b33dbff6087420f2dfc67c907f8036bc17c974c9ede424cc13d8b9",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/DS_Map/ROMFiles/GameMatrix.cs"
+    },
+    {
+      "path": "DS_Map/ROMFiles/MapFile.cs",
+      "sha256": "1e3f7b06a8bce0591ce57435aad76ca210d1610dbfd93fcc03f6b0f4fe5ada8b",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/DS_Map/ROMFiles/MapFile.cs"
+    },
+    {
+      "path": "DS_Map/ROMFiles/MapHeader.cs",
+      "sha256": "d382c1fbdccf36ef8fb8273ee19b931da397c1d39bf2324979dfd174af4e4574",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/DS_Map/ROMFiles/MapHeader.cs"
+    },
+    {
+      "path": "DS_Map/RomInfo.cs",
+      "sha256": "ca29d74e4bd9fc56093fc02a299085ccc3e60c3084d3fa55a5a667a9e1f79302",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/DS_Map/RomInfo.cs"
+    },
+    {
+      "path": "LICENSE",
+      "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/LICENSE"
+    },
+    {
+      "path": "DS_Map/ROMFiles/EventFile.cs",
+      "sha256": "cac6bce20e18f4d1f3cc3f58550eb4ed2465473d1bea59305903f023babbef9e",
+      "url": "https://raw.githubusercontent.com/DS-Pokemon-Rom-Editor/DSPRE/249a278186d80c35f04485b2c1b612bd81b90a74/DS_Map/ROMFiles/EventFile.cs"
+    }
+  ]
+}

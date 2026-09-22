@@ -1,0 +1,5 @@
+#!/bin/zsh
+set -eu
+EDITOR_DIR="${0:A:h}"
+cd "$EDITOR_DIR"
+exec "$EDITOR_DIR/.venv/bin/python" -m sovereign_editor.cli "$@"

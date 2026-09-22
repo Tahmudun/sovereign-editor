@@ -1,0 +1,93 @@
+{
+  "id": "sg-hgss-cherrygrove-v1",
+  "header_hex": "02020f00000052036f022602fb03fb0340007f11000108f6",
+  "resources": [
+    {
+      "archive": "a/0/3/2",
+      "member": 64,
+      "sha256": "03b039b761c667ef2f30571a82843d206a9c7cc675d8f9b40e45b56799dd9ff7"
+    },
+    {
+      "archive": "a/0/6/5",
+      "member": 4,
+      "sha256": "8eef9c49fdf78c81c84055f455b44f8b339cef28c2da60471c34be9f33fd4bc1"
+    },
+    {
+      "archive": "a/0/6/5",
+      "member": 5,
+      "sha256": "5a1d9f2c4916b66a818537ca2a33f738e5ca3e2f29a5d865efb703c03e2f0544"
+    },
+    {
+      "archive": "a/0/4/2",
+      "member": 2,
+      "sha256": "3195ab849ff6295a6cdec79e419acb4e7e48a9b41849c3345969f9d2ca8b06c0"
+    },
+    {
+      "archive": "a/0/4/4",
+      "member": 2,
+      "sha256": "bfecfce0640b92a69c32fe4339cafc5a77a088a668a66f67b12e6be8cf727de1"
+    },
+    {
+      "archive": "a/0/6/6",
+      "member": 0,
+      "sha256": "af18adc3aa682d710deedda9542e60fe59ce7c5c03be24d0593de833d50a91e2"
+    },
+    {
+      "archive": "a/0/1/2",
+      "member": 850,
+      "sha256": "44576c2c82f81cfe5df4bea66e3a4ecb9972afef85e6441ef2fae6538c6394c6"
+    },
+    {
+      "archive": "a/0/1/2",
+      "member": 623,
+      "sha256": "ef70aa278262b8a7ae6c53aa99edee20fae3c40362bcc39211d11135ad1dc637"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 15,
+      "sha256": "b149dd3aaa74a0250e14941de08ce1d2e97ac7bd227c0fb64a5cbf82127fd2f6"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 29,
+      "sha256": "79bb09f480f34420481952bf9871e44ebd09d37d5add1db372a03826a85fffae"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 30,
+      "sha256": "42f5429adfd3ca4c28e0279bd2f0d3c77b7b6909bcbcfb6b754fed1890ac76bb"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 37,
+      "sha256": "31811c2929bef084169a273c252a319ff64401be0f959007262dba2d1d178372"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 38,
+      "sha256": "ef0c4a8043b32b70bf4bfc8384a385bcc4ba0a3032f35c16fc0b01102d59bbbd"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 39,
+      "sha256": "c861a8f0dabdd095d85c4dde6e17da727718c0335470f846905a946365ce34f6"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 40,
+      "sha256": "cbb64956956fe272bc46c932e6af40d006d23d87d94029b577e94caf1b9e4ce7"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 50,
+      "sha256": "84f34d5901cfda86c8eb7c926f18abd8c5c01485d2cf2df304ce6aa1ddf81aec"
+    },
+    {
+      "archive": "a/0/4/0",
+      "member": 52,
+      "sha256": "88530296b27741a8c4af4039028ea2fd1205a95e3261eee4826f26695f943391"
+    }
+  ],
+  "reference_rom_sha256": "65f02a56842b75aa92d775d56d657a56fe3fa993550b04dc20704ab82d760105",
+  "preview_origin": "Sovereign Gold stock baseline-decoded assets; source report docs/research/cherrygrove-playable in engine project"
+}

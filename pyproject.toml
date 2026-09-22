@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sovereign-editor"
+version = "0.4.0"
+description = "Native Mac world editor with a shared agent CLI"
+requires-python = ">=3.11"
+dependencies = ["ndspy==4.1.0", "Pillow==11.3.0", "numpy==2.2.6", "PySide6-Essentials==6.8.3"]
+
+[project.scripts]
+sovereign = "sovereign_editor.cli:main"
+
+[tool.setuptools.package-data]
+sovereign_editor = ["assets/cherrygrove/*", "assets/dialogue-chars.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

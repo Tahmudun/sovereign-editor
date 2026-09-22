@@ -1,0 +1,10 @@
+iniconfig==2.3.0
+ndspy==4.1.0
+numpy==2.2.6
+packaging==26.3
+pillow==11.3.0
+pluggy==1.6.0
+Pygments==2.21.0
+PySide6_Essentials==6.8.3
+pytest==8.4.2
+shiboken6==6.8.3

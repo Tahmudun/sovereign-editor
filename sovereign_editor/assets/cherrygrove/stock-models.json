@@ -1,0 +1,68 @@
+{
+  "schema": "stock-placed-models-v1",
+  "models": {
+    "15": {
+      "archive": "a/0/4/0",
+      "member": 15,
+      "sha256": "b149dd3aaa74a0250e14941de08ce1d2e97ac7bd227c0fb64a5cbf82127fd2f6",
+      "name": "p_door",
+      "label": "Center / shop door"
+    },
+    "29": {
+      "archive": "a/0/4/0",
+      "member": 29,
+      "sha256": "79bb09f480f34420481952bf9871e44ebd09d37d5add1db372a03826a85fffae",
+      "name": "board_a",
+      "label": "Town sign"
+    },
+    "30": {
+      "archive": "a/0/4/0",
+      "member": 30,
+      "sha256": "42f5429adfd3ca4c28e0279bd2f0d3c77b7b6909bcbcfb6b754fed1890ac76bb",
+      "name": "board_b",
+      "label": "Mailbox"
+    },
+    "37": {
+      "archive": "a/0/4/0",
+      "member": 37,
+      "sha256": "31811c2929bef084169a273c252a319ff64401be0f959007262dba2d1d178372",
+      "name": "yo_h01",
+      "label": "House"
+    },
+    "38": {
+      "archive": "a/0/4/0",
+      "member": 38,
+      "sha256": "ef0c4a8043b32b70bf4bfc8384a385bcc4ba0a3032f35c16fc0b01102d59bbbd",
+      "name": "yo_h02",
+      "label": "Tall house"
+    },
+    "39": {
+      "archive": "a/0/4/0",
+      "member": 39,
+      "sha256": "c861a8f0dabdd095d85c4dde6e17da727718c0335470f846905a946365ce34f6",
+      "name": "fs",
+      "label": "Pok\u00e9 Mart"
+    },
+    "40": {
+      "archive": "a/0/4/0",
+      "member": 40,
+      "sha256": "cbb64956956fe272bc46c932e6af40d006d23d87d94029b577e94caf1b9e4ce7",
+      "name": "pc",
+      "label": "Pok\u00e9mon Center"
+    },
+    "50": {
+      "archive": "a/0/4/0",
+      "member": 50,
+      "sha256": "84f34d5901cfda86c8eb7c926f18abd8c5c01485d2cf2df304ce6aa1ddf81aec",
+      "name": "yo_door1",
+      "label": "House door"
+    },
+    "52": {
+      "archive": "a/0/4/0",
+      "member": 52,
+      "sha256": "88530296b27741a8c4af4039028ea2fd1205a95e3261eee4826f26695f943391",
+      "name": "yo_sp2",
+      "label": "Flower planter"
+    }
+  }
+}
