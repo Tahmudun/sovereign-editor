@@ -47,6 +47,14 @@ def test_existing_transition_script_still_runs_after_stage_flags():
     assert scripts[entries[1]:entries[1] + len(stock)] == stock
 
 
+def test_stage_hide_flags_avoid_every_special_flag_range():
+    # pret e97c7fc include/constants/flags.h: map-temp, hidden items, trainers,
+    # daily (cleared at each day change) and out-of-range flags cannot persist a stage.
+    special = [(0x1, 0x40), (800, 800 + 231 + 0x78), (0x550, 0x95F), (0x960, 0xA9F), (0xAA0, 0xB5F), (0xB60, 0xFFFF)]
+    assert len(sa.HIDE_FLAGS) == len(set(sa.HIDE_FLAGS)) >= 10
+    assert not [f for f in sa.HIDE_FLAGS for lo, hi in special if lo <= f <= hi]
+
+
 @pytest.mark.parametrize('table', [struct.pack('<BI', 2, 1) * 2 + b'\x00', struct.pack('<BI', 5, 1) + b'\x00',
                                    struct.pack('<BI', 2, 9) + b'\x00', struct.pack('<BI', 2, 1)])
 def test_unsupported_init_tables_are_refused(table):

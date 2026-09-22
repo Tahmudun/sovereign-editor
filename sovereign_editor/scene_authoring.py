@@ -4,7 +4,12 @@ from .formats import require,digest,resource,file_span,flat_height_plates,Editor
 from . import world, dialogue_format as fmt, event_authoring as ev, scenery
 from .scene_commands import Code,emit_visibility
 
-HIDE_FLAGS=(0xb47,0xb48,0xb49,0xb4b,0xb4c,0xb4d,0xb4f,0xb50,0xb51,0xb53,0xb54,0xb55,0xb57,0xb58,0xb59,0xb5b,0xb5c,0xb5d,0xb5f)
+# Persistent flags pret leaves unidentified between hidden items and trainer
+# flags, absent from every baseline script (any byte offset) and object event.
+# The earlier 0xB47.. choice sat in the daily range (0xAA0-0xB5F), which the
+# game clears at each day change.
+HIDE_FLAGS=(0x521,0x525,0x527,0x529,0x531,0x533,0x534,0x539,0x53b,0x53d,0x543,0x545,0x54c,0x54d)
+PERSISTENT_FLAG_RANGE=(0x480,0x54f)
 EXTRA_FIELDS={'presence','trigger','stock_sprite'}
 
 
@@ -28,6 +33,8 @@ def qualify_flags(project):
     from .character_runtime import BASELINE
     import ndspy.narc
     require(digest(project.blob)==BASELINE,'Scene flags require pinned baseline','UNSUPPORTED_RUNTIME')
+    lo,hi=PERSISTENT_FLAG_RANGE
+    require(all(lo<=f<=hi for f in HIDE_FLAGS),'Scene flag is outside the persistent range','STATE_CONFLICT')
     scripts=ndspy.narc.NARC(file_span(project.blob,fmt.SCRIPT_ARCHIVE)[1]).files
     require(all(not any(struct.pack('<H',f) in raw for raw in scripts) for f in HIDE_FLAGS),'Scene flag appears in baseline scripts','STATE_CONFLICT')
     events=ndspy.narc.NARC(file_span(project.blob,world.EVENT_ARCHIVE)[1]).files
