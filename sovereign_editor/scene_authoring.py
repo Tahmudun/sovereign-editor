@@ -44,17 +44,26 @@ def qualify_flags(project):
     project._scene_flags_qualified=True
 
 
+def allocate_hide_flag(state,before):
+    """Keep an actor's flag; otherwise the first flag no composed sequence holds.
+
+    Derived only from the state being planned or replayed, never project.doc:
+    Redo validates a snapshot while the document still holds the undone history.
+    """
+    if before and before.get('hide_flag'):return before['hide_flag']
+    used={s.get('hide_flag') for s in state.get('story',{}).get('sequence',{}).values()}
+    free=[f for f in HIDE_FLAGS if f not in used]
+    require(bool(free),'Scene actor capacity exhausted','RESOURCE_CAPACITY')
+    return free[0]
+
+
 def extend_plan(project,context,state,index,value,after,before):
     variables=state.get('story',{}).get('state',{})
     if value.get('presence'):
         require(value['kind']=='npc','Only NPCs have presence conditions','INVALID_EVENT')
         require(value['movement']==0,'Stage-owned scene actors must stand still between scenes','INVALID_EVENT')
         condition(value['presence'],variables);qualify_flags(project)
-        if before and before.get('hide_flag'):after['hide_flag']=before['hide_flag']
-        else:
-            used={t.get('after',{}).get('hide_flag') for t in project.doc['map_edits'][:index] if isinstance(t.get('after'),dict)}
-            free=[f for f in HIDE_FLAGS if f not in used]
-            require(bool(free),'Scene actor capacity exhausted','RESOURCE_CAPACITY');after['hide_flag']=free[0]
+        after['hide_flag']=allocate_hide_flag(state,before)
     if value.get('trigger'):
         t=value['trigger']
         require(value['kind']=='trigger' and not value['once_state'],'Conditional triggers use stage state, not one-time state','INVALID_EVENT')

@@ -55,6 +55,18 @@ def test_stage_hide_flags_avoid_every_special_flag_range():
     assert not [f for f in sa.HIDE_FLAGS for lo, hi in special if lo <= f <= hi]
 
 
+def test_hide_flags_follow_the_replayed_state_not_the_live_document():
+    # Redo validates a snapshot while project.doc still holds the undone history.
+    flags = sa.HIDE_FLAGS
+    state = {'story': {'sequence': {'a': {'hide_flag': flags[0]}, 'b': {'hide_flag': flags[1]}, 'c': {}}}}
+    assert sa.allocate_hide_flag(state, None) == flags[2]
+    assert sa.allocate_hide_flag(state, {'hide_flag': flags[0]}) == flags[0]
+    assert sa.allocate_hide_flag(state, {}) == flags[2]
+    full = {'story': {'sequence': {str(i): {'hide_flag': f} for i, f in enumerate(flags)}}}
+    with pytest.raises(EditorError, match='capacity'):
+        sa.allocate_hide_flag(full, None)
+
+
 @pytest.mark.parametrize('table', [struct.pack('<BI', 2, 1) * 2 + b'\x00', struct.pack('<BI', 5, 1) + b'\x00',
                                    struct.pack('<BI', 2, 9) + b'\x00', struct.pack('<BI', 2, 1)])
 def test_unsupported_init_tables_are_refused(table):
