@@ -253,42 +253,52 @@ def gather_routes(project,state,s):
     return result
 
 
-def add_initializers(project,state,result):
-    """Append guarded load/resume scripts; keep original init records/bodies.
+TRANSITION=2   # pret INIT_SCRIPT_ON_TRANSITION
 
-    Native ON_LOAD sets hide flags before object creation. ON_RESUME need not
-    replay a scene. Live stage changes use explicit sync steps.
+
+def chain_transition(init,raw,emit):
+    """Run emit's bytecode first on every map entry; keep all original records/bodies.
+
+    pret e97c7fc runs ON_TRANSITION before Field_InitMapObjectsFromZoneEventData on
+    warps (field_warp_tasks.c sub_02053038) and connections (fieldmap.c
+    FieldMap_ChangeZone). ON_LOAD runs after objects exist and never on a
+    connection, so stage hide flags set there would not decide who spawns.
     """
+    records=[];at=0
+    while at<len(init) and init[at]:
+        require(at+5<=len(init) and init[at] in (1,2,3,4),'Unsupported map init table','UNSUPPORTED_SCRIPT')
+        records.append((at,init[at],struct.unpack_from('<I',init,at+1)[0]));at+=5
+    require(at<len(init),'Unterminated map init table','UNSUPPORTED_SCRIPT')
+    require(sum(t==TRANSITION for _,t,_ in records)<=1,'Duplicate map transition script','UNSUPPORTED_SCRIPT')
+    oldentries=fmt.script_entries(raw)[1];new_id=len(oldentries)+1
+    previous=next((val for _,t,val in records if t==TRANSITION),None)
+    c=Code();emit(c)
+    require(not c.movements,'Map transition scripts cannot move actors','UNSUPPORTED_SCRIPT')
+    if previous is not None:
+        require(previous>>16==0 and 1<=previous<=len(oldentries),'Unsupported map transition script ID','UNSUPPORTED_SCRIPT')
+        c.emit('Hi',22,0)   # GoTo the original transition script afterwards
+    else:c.emit('H',2)
+    payload=c.finish();combined=bytearray(fmt.append_scripts(raw,[payload]))
+    if previous is not None:
+        entries=fmt.script_entries(combined)[1];jump_at=entries[-1]+len(payload)-4
+        struct.pack_into('<i',combined,jump_at,entries[previous-1]-jump_at-4)
+        patched=bytearray(init);loc=next(i for i,t,_ in records if t==TRANSITION);struct.pack_into('<I',patched,loc+1,new_id)
+    else:
+        # Frame-table records hold offsets relative to themselves; prepending a
+        # fixed five-byte record moves each record and its table together.
+        patched=bytearray(struct.pack('<BI',TRANSITION,new_id)+init)
+    return bytes(patched),bytes(combined)
+
+
+def add_initializers(project,state,result):
+    """Stage-owned actor visibility on map entry. Live stage changes use sync steps."""
     areas={s['context']['header']:s for s in state.get('story',{}).get('sequence',{}).values() if s.get('presence')}
     for header,s in areas.items():
         ctx=project.context(header=header,cell=s['context']['cell']);hm=ctx['header']['level_script'];sm=s['script_member']
         init=resource(project.blob,fmt.SCRIPT_ARCHIVE,hm)[1]
-        # Fixed init entries are5 bytes; preserve frame-table offsets by adding
-        # a fixed record at the front and adjusting any relative table pointers.
-        records=[];at=0
-        while at<len(init) and init[at]:
-            require(at+5<=len(init) and init[at] in (1,2,3,4),'Unsupported map init table','UNSUPPORTED_SCRIPT')
-            records.append((at,init[at],struct.unpack_from('<I',init,at+1)[0]));at+=5
-        require(at<len(init),'Unterminated map init table','UNSUPPORTED_SCRIPT')
-        require(sum(t==4 for _,t,_ in records)<=1,'Duplicate map load script','UNSUPPORTED_SCRIPT')
         raw=result[fmt.SCRIPT_ARCHIVE].get(sm,resource(project.blob,fmt.SCRIPT_ARCHIVE,sm)[1])
-        oldentries=fmt.script_entries(raw)[1];new_id=len(oldentries)+1
-        c=Code();emit_visibility(c,actors_for(state,s['event_member']),state['story']['state'])
-        oldload=next((val for _,t,val in records if t==4),None)
-        if oldload:
-            require(oldload>>16==0 and 1<=oldload<=len(oldentries),'Unsupported map load script ID','UNSUPPORTED_SCRIPT')
-            c.emit('Hi',22,0)
-        else:c.emit('H',2)
-        payload=c.finish();combined=bytearray(fmt.append_scripts(raw,[payload]))
-        if oldload:
-            entries=fmt.script_entries(combined)[1];jump_at=entries[-1]+len(payload)-4
-            struct.pack_into('<i',combined,jump_at,entries[oldload-1]-jump_at-4)
-        if oldload is not None:
-            patched=bytearray(init);loc=next(i for i,t,_ in records if t==4);struct.pack_into('<I',patched,loc+1,new_id)
-        else:
-            patched=bytearray(struct.pack('<BI',4,new_id)+init)
-            # Existing on-frame relative destinations and their pointers both
-            # move by five bytes, so their deltas are unchanged.
-        result[fmt.SCRIPT_ARCHIVE][sm]=bytes(combined)
+        actors=actors_for(state,s['event_member']);variables=state['story']['state']
+        patched,combined=chain_transition(init,raw,lambda c:emit_visibility(c,actors,variables))
+        result[fmt.SCRIPT_ARCHIVE][sm]=combined
         require(hm not in result[fmt.SCRIPT_ARCHIVE],'Conflicting map initialization edit','SHARED_RESOURCE')
-        result[fmt.SCRIPT_ARCHIVE][hm]=bytes(patched)
+        result[fmt.SCRIPT_ARCHIVE][hm]=patched
