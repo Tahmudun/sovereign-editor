@@ -16,8 +16,8 @@ def allocation(project,state):
     result={};sc={};tc={}
     for identity,s in specs(state).items():
         script=s['script_member'];text=s['text_member']
-        if script not in sc:sc[script]=len(fmt.script_entries(resource(project.blob,fmt.SCRIPT_ARCHIVE,script)[1])[1])
-        if text not in tc:tc[text]=len(fmt.text_entries(resource(project.blob,fmt.TEXT_ARCHIVE,text)[1])[1])
+        if script not in sc:sc[script]=len(fmt.script_entries(project.resource(fmt.SCRIPT_ARCHIVE,script)[1])[1])
+        if text not in tc:tc[text]=len(fmt.text_entries(project.resource(fmt.TEXT_ARCHIVE,text)[1])[1])
         result[identity]=(sc[script]+1,tc[text]);sc[script]+=1;tc[text]+=1
         require(sc[script]<1000 and tc[text]<=256,'Simple script/text capacity exceeded','RESOURCE_CAPACITY')
     return result
@@ -51,8 +51,8 @@ def replacements(project,state):
         _,message=ids[key]
         texts.setdefault(s['text_member'],[]).append(s['dialogue'])
         scripts.setdefault(s['script_member'],[]).append(fmt.talk_script(message,s['kind']))
-    return {fmt.TEXT_ARCHIVE:{m:fmt.append_messages(resource(project.blob,fmt.TEXT_ARCHIVE,m)[1],v) for m,v in texts.items()},
-            fmt.SCRIPT_ARCHIVE:{m:fmt.append_scripts(resource(project.blob,fmt.SCRIPT_ARCHIVE,m)[1],v) for m,v in scripts.items()}}
+    return {fmt.TEXT_ARCHIVE:{m:fmt.append_messages(project.resource(fmt.TEXT_ARCHIVE,m)[1],v) for m,v in texts.items()},
+            fmt.SCRIPT_ARCHIVE:{m:fmt.append_scripts(project.resource(fmt.SCRIPT_ARCHIVE,m)[1],v) for m,v in scripts.items()}}
 
 
 def validate(project,state):
@@ -95,7 +95,7 @@ def plan(project,context,state,index,action,identity=None,kind=None,donor_id=Non
         require(before['context']==authoring.context_ref(context), 'Choose the authored interaction’s original context', 'CONTEXT_MISMATCH')
     users=resource_users(project,context)
     for header in users['events']:
-        other=world.read_header(project.blob,header,project.arm9)
+        other=project.header(header)
         require((other['script_file'],other['text_archive']) ==
                 (context['header']['script_file'],context['header']['text_archive']),
                 'Shared events use different script/text resources in another header', 'SHARED_RESOURCE')
@@ -111,7 +111,15 @@ def plan(project,context,state,index,action,identity=None,kind=None,donor_id=Non
         else:
             if action=='duplicate':kind=before['kind'];donor_id=before['donor_id'];dialogue=dialogue if dialogue is not None else before['dialogue']
             require(kind in ('npc','background'),'Choose NPC or sign','INVALID_INPUT')
-            donor=next((r for r in ev.records(ev.base(project,context['event_member'])) if r['kind']==kind and r['id']==donor_id),None)
+            from . import world_authoring
+            if donor_id is None and world_authoring.created(project,context):
+                # Created area: stock height word 0 on one verified flat floor; an
+                # NPC names its stock appearance explicitly (sprite, v2 only).
+                require(kind=='background' or _version==2 and sprite is not None,
+                        'Choose a stock appearance for an NPC in a created area','INVALID_INPUT')
+                donor={'x':x,'z':z,'raw':bytes(32),'sprite':sprite}
+            else:
+                donor=next((r for r in ev.records(ev.base(project,context['event_member'])) if r['kind']==kind and r['id']==donor_id),None)
             require(donor is not None,'Choose a baseline appearance/height donor in this map','NOT_FOUND')
             head=context['header'];identity=f'simple:{index}'
             npc_ids=[r['id'] for r in ev.records(ev.base(project,context['event_member'])) if r['kind']=='npc']
@@ -157,8 +165,8 @@ def plan(project,context,state,index,action,identity=None,kind=None,donor_id=Non
     else:current[identity]=after
     trial={**state,'simple_interactions':current};validate(project,trial)
     deps={'event':digest(ev.base(project,context['event_member'])),
-          'script':digest(resource(project.blob,fmt.SCRIPT_ARCHIVE,context['header']['script_file'])[1]),
-          'text':digest(resource(project.blob,fmt.TEXT_ARCHIVE,context['header']['text_archive'])[1]),
+          'script':digest(project.resource(fmt.SCRIPT_ARCHIVE,context['header']['script_file'])[1]),
+          'text':digest(project.resource(fmt.TEXT_ARCHIVE,context['header']['text_archive'])[1]),
           'context':authoring.dependencies(context,index), 'shared_headers':users}
     request=dict(action=action,identity=identity if action not in ('create','duplicate') else (None if action=='create' else next(k for k,v in specs(state).items() if v==before)),kind=kind,donor_id=donor_id,x=x,z=z,facing=facing,dialogue=dialogue,label=label)
     if _version==2:

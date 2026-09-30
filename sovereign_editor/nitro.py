@@ -220,27 +220,37 @@ def _signed(value, bits):
 
 
 def _display_list(data, scale, matrix, material):
+    # Positions, colors and UVs are kept as Python floats while decoding (the same
+    # IEEE operations as the former per-vertex numpy arrays) and stacked once.
     cursor, mode = 0, None
-    last, uv = np.zeros(3), np.zeros(2)
-    color = np.array(material["diffuse"] if material["set_vertex_color"] else [1, 1, 1])
+    last, uv = [0.0, 0.0, 0.0], (0.0, 0.0)
+    color = tuple(material["diffuse"]) if material["set_vertex_color"] else (1, 1, 1)
     vertices, colors, uvs, triangles, group, normals = [], [], [], [], [], []
     normal = 0
     shade = 0x20 if material['set_vertex_color'] else 0
     shades, polygons = [], []
-    while cursor < len(data):
-        commands = span(data, cursor, 4)
+    # Identity node transform (every map model): the product is the scaled position
+    # itself, so skip one 4x4 matrix-vector product per vertex.
+    identity = bool(np.array_equal(matrix, np.eye(4)))
+    scale = float(scale)
+    commands_by_id = ndspy.model._COMMANDS_BY_ID
+    size = len(data)
+    while cursor < size:
+        require(cursor + 4 <= size, "Record exceeds container bounds")
+        commands = data[cursor:cursor + 4]
         cursor += 4
         for command in commands:
             require(command in (0, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x40, 0x41),
                     f"Unsupported geometry command 0x{command:02x}")
-            count = ndspy.model._COMMANDS_BY_ID[command].PARAM_COUNT
-            raw = span(data, cursor, count * 4)
+            count = commands_by_id[command].PARAM_COUNT
+            require(cursor + count * 4 <= size, "Record exceeds container bounds")
+            raw = data[cursor:cursor + count * 4]
             cursor += count * 4
             if command == 0:
                 continue
             v = struct.unpack_from("<I", raw)[0] if count else 0
             if command == 0x20:
-                color = np.array([(v >> shift & 31) / 31 for shift in (0, 5, 10)])
+                color = tuple((v >> shift & 31) / 31 for shift in (0, 5, 10))
                 shade = command
             elif command == 0x21:
                 # Normals are retained by the source. This inspection renderer
@@ -248,21 +258,26 @@ def _display_list(data, scale, matrix, material):
                 normal = v
                 shade = command
             elif command == 0x22:
-                uv = np.array(struct.unpack("<2h", raw)) / 16
+                uv = tuple(c / 16 for c in struct.unpack("<2h", raw))
             elif 0x23 <= command <= 0x28:
                 if command == 0x23:
-                    last = np.array(struct.unpack_from("<3h", raw)) / 4096
+                    last = [c / 4096 for c in struct.unpack_from("<3h", raw)]
                 elif command == 0x24:
-                    last = np.array([_signed(v >> shift & 1023, 10) for shift in (0, 10, 20)]) / 64
+                    last = [_signed(v >> shift & 1023, 10) / 64 for shift in (0, 10, 20)]
                 elif command == 0x28:
-                    last += np.array([_signed(v >> shift & 1023, 10) for shift in (0, 10, 20)]) / 4096
+                    last = [a + _signed(v >> shift & 1023, 10) / 4096 for a, shift in zip(last, (0, 10, 20))]
                 else:
-                    axes = {0x25: [0, 1], 0x26: [0, 2], 0x27: [1, 2]}[command]
-                    last[axes] = np.array(struct.unpack("<2h", raw)) / 4096
+                    axes = {0x25: (0, 1), 0x26: (0, 2), 0x27: (1, 2)}[command]
+                    last = list(last)
+                    for axis, c in zip(axes, struct.unpack("<2h", raw)):
+                        last[axis] = c / 4096
                 require(mode is not None, "Vertex outside primitive")
-                vertices.append((matrix @ np.append(last * scale, 1))[:3])
-                colors.append(color.copy())
-                uvs.append(uv.copy())
+                if identity:
+                    vertices.append([c * scale for c in last])
+                else:
+                    vertices.append((matrix @ np.append(np.array(last) * scale, 1))[:3])
+                colors.append(color)
+                uvs.append(uv)
                 normals.append(normal)
                 shades.append(shade)
                 group.append(len(vertices) - 1)
@@ -291,7 +306,8 @@ def _display_list(data, scale, matrix, material):
                                           [group[i], group[i + 3], group[i + 2]]])
                 mode = None
     require(mode is None and vertices, "Incomplete or empty display list")
-    return Primitive(np.array(vertices), np.array(colors), np.array(uvs), np.array(triangles), material,
+    return Primitive(np.array(vertices, dtype=float), np.array(colors, dtype=float), np.array(uvs, dtype=float),
+                     np.array(triangles), material,
                      normals=np.array(normals, dtype=np.uint32), polygons=polygons,
                      shade_commands=np.array(shades, dtype=np.uint8))
 
@@ -344,14 +360,16 @@ def model_names(raw):
 
 
 @lru_cache(maxsize=48)
-def decode_model(raw, geometry_only=False, tileset=None, index=0):
+def decode_model(raw, geometry_only=False, tileset=None, index=0, render=True):
     """Decode a static model.
 
     ``geometry_only`` is for independent GLB comparisons. ``tileset`` supplies the
     area tileset bytes (``a/0/4/4`` or ``a/0/7/0``) for the models that carry no
     embedded ``TEX0``; an embedded block always wins, and a name that neither source
     defines is reported rather than substituted. ``index`` selects one model of a
-    multi-model container.
+    multi-model container. ``render=False`` still resolves every texture/palette
+    name and checks its dimensions but skips pixel rendering (writers and replay
+    validation use geometry and materials only).
     """
     container = blocks(raw)
     require(b"MDL0" in container, "Model block absent")
@@ -397,6 +415,7 @@ def decode_model(raw, geometry_only=False, tileset=None, index=0):
             require(tn in textures and (pn is None or pn in palettes), f"Unresolved texture/palette: {tn}/{pn}")
             texture = textures[tn]
             require((texture.width, texture.height) == (material["width"], material["height"]), "Texture dimensions disagree")
+        if not geometry_only and render and material["texture_name"] is not None:
             # ndspy 4.1 Palette stores ColorTuple entries but its texture renderer
             # indexes a packed-color LUT. Adapt at the boundary without mutating it.
             palette = [ndspy.color.pack(*color) for color in palettes[pn]] if pn else None

@@ -83,7 +83,15 @@ def asset_dependency(project, context, record):
 def floor_height(project, context, position):
     x = position["x"] - context["origin"][0] - 16
     z = position["z"] - context["origin"][1] - 16
-    plates = flat_height_plates(project.member_raw(context["map_member"]))
+    raw = project.member_raw(context["map_member"])
+    composed = getattr(project, "_terrain_bdhc", {}).get(context["map_member"])
+    if composed is not None:
+        # Terrain authoring v1 replaced this member's height table; read the composed one.
+        sections = map_sections(raw)
+        raw = raw[:sections["terrain_offset"]] + composed
+        raw = raw[:12] + struct.pack("<I", len(composed)) + raw[16:]
+    # Only the plates at the queried point must be flat (a stair elsewhere in the map is fine).
+    plates = flat_height_plates(raw, point=(x, z))
     heights = {p["height"] for p in plates if p["bounds"][0] <= x < p["bounds"][2]
                and p["bounds"][1] <= z < p["bounds"][3]}
     require(len(heights) == 1, "Transfer needs one verified flat height at each anchor",
@@ -92,6 +100,8 @@ def floor_height(project, context, position):
 
 
 def protected(obj, member, slot, state):
+    if obj["id"].startswith("prop:"):
+        return "This is a custom prop instance; move, duplicate or remove it with the prop tools."
     if obj["id"] == "baseline:0:13":
         return "This town sign has a bound text interaction; use its existing move/alignment controls."
     if ("placement", member, slot) in state["legacy_domain"]:
@@ -152,7 +162,8 @@ def plan(project, context, state, index, operation, slot, x=None, z=None,
         require(context["resources"]["building_models"] == target["resources"]["building_models"]
                 and context["resources"]["building_textures"] == target["resources"]["building_textures"],
                 "Destination uses a different model archive or texture set", "INCOMPATIBLE_ASSETS")
-        require(context["cell"]["altitude"] == target["cell"]["altitude"]
+        # A matrix without an altitude section (every stock private matrix) is altitude 0.
+        require((context["cell"]["altitude"] or 0) == (target["cell"]["altitude"] or 0)
                 and floor_height(project, context, before) == floor_height(project, target, after),
                 "Transfer would change the object's ground height", "UNSUPPORTED_HEIGHT")
         require(asset_dependency(project, target, obj["raw"]) == assets,

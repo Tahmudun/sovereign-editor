@@ -47,8 +47,149 @@ def main(argv=None):
     create.add_argument("--rom", required=True, type=Path)
     create.add_argument("--project", required=True, type=Path)
     create.add_argument("--name", default="Cherrygrove workspace")
+    clone = sub.add_parser("clone", help="Copy a verified project with its full history and project-owned assets")
+    clone.add_argument("--project", required=True, type=Path)
+    clone.add_argument("--output", required=True, type=Path, help="New project folder (must not exist)")
+    clone.add_argument("--name")
+    data_catalog = sub.add_parser('data-catalog', help='Qualified move/item/ability/effect/TM/shop/respawn catalogs with refusal reasons')
+    data_catalog.add_argument('--project', required=True, type=Path)
+    data_catalog.add_argument('--kind', required=True, choices=('moves', 'items', 'abilities', 'effects', 'machines', 'shops', 'spawns'))
+    data_catalog.add_argument('--search', default='')
+    data_catalog.add_argument('--offset', type=int, default=0)
+    data_catalog.add_argument('--limit', type=int, default=40)
+    data_record = sub.add_parser('data-record', help='Decoded move/item record (before_sha256) or a shop inventory (before)')
+    data_record.add_argument('--project', required=True, type=Path)
+    data_record.add_argument('--kind', required=True, choices=('move', 'item', 'shop'))
+    data_record.add_argument('--id', type=int)
+    data_record.add_argument('--name', help='Shop name (kind shop)')
+    data_edit = sub.add_parser('data-edit', help='Preview/apply move, item, TM and shop changes (one batch)')
+    data_edit.add_argument('--project', required=True, type=Path)
+    data_edit.add_argument('--request', required=True, type=Path, help='JSON {operations, label}')
+    data_edit.add_argument('--dry-run', action='store_true')
+    data_edit.add_argument('--revision', type=int)
+    pack = sub.add_parser('package', help='Write a portable, verified project package (ZIP)')
+    pack.add_argument('--project', required=True, type=Path)
+    pack.add_argument('--output', required=True, type=Path)
+    pack.add_argument('--include-baseline', action='store_true', help='Carry the baseline ROM inside the package')
+    unpack = sub.add_parser('unpack', help='Open a package into a new folder, verifying files and the baseline binding')
+    unpack.add_argument('--package', required=True, type=Path)
+    unpack.add_argument('--output', required=True, type=Path)
+    unpack.add_argument('--baseline', type=Path, help='The baseline ROM when the package does not carry it')
+    cp = sub.add_parser('checkpoint', help='Save a named checkpoint of the project and its asset packages')
+    cp.add_argument('--project', required=True, type=Path)
+    cp.add_argument('--name', required=True)
+    cp.add_argument('--revision', required=True, type=int)
+    cp.add_argument('--note')
+    cps = sub.add_parser('checkpoints', help='List checkpoints and how they differ from the current edits')
+    cps.add_argument('--project', required=True, type=Path)
+    rs = sub.add_parser('restore', help='Restore a checkpoint as one undoable edit (automatic backup first)')
+    rs.add_argument('--project', required=True, type=Path)
+    rs.add_argument('--name', required=True)
+    rs.add_argument('--revision', required=True, type=int)
+    rc = sub.add_parser('recover', help='Replace a project.json that no longer opens with a checkpoint')
+    rc.add_argument('--project', required=True, type=Path)
+    rc.add_argument('--name', required=True)
+    cov = sub.add_parser('coverage', help='Supported / limited / read-only / unsupported features and live limits')
+    cov.add_argument('--project', required=True, type=Path)
+    ws_search = sub.add_parser('workspace-search', help='Search every authored resource with its cross-links')
+    ws_search.add_argument('--project', required=True, type=Path)
+    ws_search.add_argument('--query', default='')
+    ws_search.add_argument('--kind', action='append', choices=('area', 'character', 'trainer', 'state', 'event', 'shop',
+                                                               'record', 'asset', 'connection', 'terrain'))
+    ws_search.add_argument('--limit', type=int, default=200)
+    ws_refs = sub.add_parser('workspace-refs', help='Uses and shared users of one resource (kind:key)')
+    ws_refs.add_argument('--project', required=True, type=Path)
+    ws_refs.add_argument('--ref', required=True)
+    progress = sub.add_parser('progression-report', help='Warp/travel graph and graded findings (errors, conditional, warnings)')
+    progress.add_argument('--project', required=True, type=Path)
+    reach = sub.add_parser('reach-report', help='Static walk/warp/travel reach from a tile or a save (read-only)')
+    reach.add_argument('--project', required=True, type=Path)
+    reach.add_argument('--save', type=Path)
+    reach.add_argument('--header', type=int)
+    reach.add_argument('--x', type=int)
+    reach.add_argument('--z', type=int)
+    reach.add_argument('--surf', action='store_true')
+    reach.add_argument('--unconditional-only', action='store_true')
+    impact = sub.add_parser('impact-report', help='Resources a staged batch changes and who shares them (no write)')
+    impact.add_argument('--project', required=True, type=Path)
+    impact.add_argument('--request', required=True, type=Path, help='JSON {operations, label}')
     story = sub.add_parser('story-library', help='List imported characters, trainers, persistent state and events')
     story.add_argument('--project', required=True, type=Path)
+    for command in ('gameplay-data', 'gameplay-edit', 'gameplay-catalog', 'gameplay-areas', 'gameplay-species'):
+        cmd = sub.add_parser(command, help='Inspect or author qualified trainer teams, wild encounters and species data')
+        cmd.add_argument('--project', required=True, type=Path)
+        if command in ('gameplay-data', 'gameplay-edit'):
+            cmd.add_argument('--header', type=int, default=34)
+        if command == 'gameplay-species':
+            cmd.add_argument('--species', required=True, type=int)
+            cmd.add_argument('--form', type=int, default=0)
+        if command == 'gameplay-areas':
+            cmd.add_argument('--search', default='')
+            cmd.add_argument('--offset', type=int, default=0)
+            cmd.add_argument('--limit', type=int, default=40)
+        if command == 'gameplay-edit':
+            cmd.add_argument('--request', required=True, type=Path)
+            cmd.add_argument('--dry-run', action='store_true')
+            cmd.add_argument('--revision', type=int)
+        elif command == 'gameplay-catalog':
+            cmd.add_argument('--kind', choices=('species', 'moves', 'items', 'types', 'abilities', 'growth', 'machines',
+                                                      'species_forms', 'evolution_methods', 'evolution_items'), required=True)
+            cmd.add_argument('--search', default='')
+            cmd.add_argument('--offset', type=int, default=0)
+            cmd.add_argument('--limit', type=int, default=40)
+    cmd = sub.add_parser('field-view', help='Placed field-move features (place/remove via area-edit kind field)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('travel-view', help='Authored respawn and Fly points (define/revise/retire via area-edit '
+                                            'kind travel)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('petal-view', help='Areas with airborne petals and their runtime numbers (set/remove via '
+                                           'area-edit kind petals)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('repair-view', help='Qualified base-ROM repairs and whether they are applied (apply/remove '
+                                            'via area-edit kind repair)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('pokemon-view', help='Imported Pokémon packages and form identities (import/revise/bind/'
+                                             'remove via area-edit kind pokemon)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('group-view', help='Map group templates and placed copies (capture/forget/place/move/remove '
+                                           'via area-edit kind map_group)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('env-view', help='Reusable environments: ground/prop members, presets and donors (define/'
+                                         'revise/retire/place via area-edit kind environment)')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd = sub.add_parser('reuse', help='Copy selected definitions (kind:key) and their dependencies from another '
+                                      'project into this one by their ordinary operations; dry run without --revision')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd.add_argument('--source', required=True, type=Path)
+    cmd.add_argument('--item', action='append', required=True, help='state|character|trainer|prop|ground|pokemon|identity:key')
+    cmd.add_argument('--revision', type=int)
+    cmd = sub.add_parser('pokemon-stage', help='Validate a prepared Pokémon package folder (no writes) and print the '
+                                              'import/revise operation')
+    cmd.add_argument('--project', required=True, type=Path)
+    cmd.add_argument('--source', required=True, type=Path)
+    cmd.add_argument('--key', required=True)
+    cmd.add_argument('--display', required=True)
+    cmd.add_argument('--template', required=True, type=int, help='base species whose records set the layout')
+    cmd.add_argument('--icon-palette', required=True, type=int, choices=(0, 1, 2))
+    for command in ('ground-view', 'ground-stage'):
+        cmd = sub.add_parser(command, help='Custom ground materials: registered materials/variants/users, or bake '
+                                           'an import folder (register/revise via area-edit kind ground)')
+        cmd.add_argument('--project', required=True, type=Path)
+        if command == 'ground-stage':
+            cmd.add_argument('--source', required=True, type=Path, help='material.json + indexed PNG folder')
+    for command in ('prop-view', 'prop-stage', 'prop-edit'):
+        cmd = sub.add_parser(command, help='Custom static props: inspect, bake/preview an import folder, or apply operations')
+        cmd.add_argument('--project', required=True, type=Path)
+        if command == 'prop-stage':
+            cmd.add_argument('--source', required=True, type=Path, help='asset.json + OBJ + indexed PNG folder')
+        if command == 'prop-edit':
+            cmd.add_argument('--request', required=True, type=Path,
+                             help='JSON {operations:[...], label?, context?}; register/revise may name source instead of package')
+            cmd.add_argument('--dry-run', action='store_true')
+            cmd.add_argument('--revision', type=int)
+    report = sub.add_parser('scene-report', help='Validate and trace scene positions, gaze, presence and approach routes')
+    report.add_argument('--project', required=True, type=Path)
+    report.add_argument('--key', required=True)
     area = sub.add_parser('area-edit', help='Preview/apply one atomic batch of area operations')
     area.add_argument('--project', required=True, type=Path)
     area.add_argument('--request', required=True, type=Path, help='JSON object containing operations and optional label')
@@ -69,6 +210,20 @@ def main(argv=None):
             cmd.add_argument('--z', required=True, type=int)
         if name == 'surface-palette':
             cmd.add_argument('--images', action='store_true')
+    areas = sub.add_parser('world-areas', help='List created areas, their private resources, connections and header capacity')
+    areas.add_argument('--project', required=True, type=Path)
+    ident = sub.add_parser('world-identity', help='Created-area names, popups, music, weather, Pokégear markers, parents, '
+                           'static forest cells and Headbutt tiles, with valid values; edit them with area-edit '
+                           'world identity/animation/trees operations')
+    ident.add_argument('--project', required=True, type=Path)
+    terrain = sub.add_parser('terrain-inspect', help='Terrain authoring v1: supported family, limits, terraces/ponds '
+                             'and sound plates (rain conflicts) of a created area; edit with area-edit kind elevation')
+    terrain.add_argument('--project', required=True, type=Path)
+    terrain.add_argument('--header', required=True, type=int)
+    for name, text in (('capacity', 'Used/available limits for characters, trainers, states, visibility, headers, cells and encounters'),
+                       ('runtime-report', 'Consolidated resident/field runtime allocation after all additions')):
+        cmd = sub.add_parser(name, help=text)
+        cmd.add_argument('--project', required=True, type=Path)
     appearances = sub.add_parser('npc-appearances', help='List supported stock NPC appearances and behaviors')
     appearances.add_argument('--project', required=True, type=Path)
     library = sub.add_parser('area-library', help='Browse compatible stock donor maps and templates')
@@ -172,6 +327,9 @@ def main(argv=None):
     ui.add_argument("--project", type=Path)
     ui.add_argument("--map-inspector", action="store_true", dest="map_inspector",
                     help="Open the map/permission inspector window")
+    ui.add_argument('--gameplay', action='store_true', help='Open teams, wild encounters and species data')
+    ui.add_argument('--smoke-test', action='store_true', dest='smoke',
+                    help='Open the windows, process events briefly, print a JSON launch report and exit')
     sprite = sub.add_parser("aseprite")
     sprite.add_argument("action", choices=("doctor", "export"))
     sprite.add_argument("--source", type=Path)
@@ -180,9 +338,17 @@ def main(argv=None):
     try:
         if args.command == "ui":
             from .gui import launch
-            return launch(args.project, map_inspector=args.map_inspector)
+            if args.gameplay and (not args.project or args.map_inspector):
+                p.error('--gameplay requires --project and cannot combine with --map-inspector')
+            return launch(args.project, map_inspector=args.map_inspector, gameplay=args.gameplay, smoke=args.smoke)
         if args.command == "create":
             result = Project.create(args.rom, args.project, args.name).inspect()
+        elif args.command == 'unpack':
+            from .recovery import unpack
+            result = unpack(args.package, args.output, args.baseline)
+        elif args.command == 'recover':
+            from .recovery import recover
+            result = recover(args.project, args.name)
         elif args.command == "aseprite":
             from .aseprite import doctor, export_sheet
             if args.action == "doctor":
@@ -193,8 +359,113 @@ def main(argv=None):
                 result = export_sheet(args.source, args.output)
         else:
             project = Project(args.project)
-            if args.command == "story-library":
+            if args.command == "clone":
+                result = project.clone(args.output, args.name).inspect()
+            elif args.command == 'package':
+                result = project.package(args.output, args.include_baseline)
+            elif args.command == 'checkpoint':
+                result = project.checkpoint(args.name, args.revision, args.note)
+            elif args.command == 'checkpoints':
+                result = project.checkpoints()
+            elif args.command == 'restore':
+                result = project.restore_checkpoint(args.name, args.revision)
+            elif args.command == 'data-catalog':
+                result = project.data_catalog(args.kind, args.search, args.offset, args.limit)
+            elif args.command == 'data-record':
+                result = project.data_record(args.kind, args.name if args.kind == 'shop' else args.id)
+            elif args.command == 'data-edit':
+                request = json.loads(args.request.read_text())
+                if args.dry_run:
+                    plan = project.plan_data_edit(**request)
+                    result = {'revision': project.doc['revision'], 'empty': plan['empty'], 'preview': plan['preview']}
+                else:
+                    if args.revision is None:
+                        p.error('data-edit requires --revision unless --dry-run is given')
+                    result = project.apply_data_edit(args.revision, **request)
+            elif args.command == 'coverage':
+                result = project.coverage()
+            elif args.command == 'workspace-search':
+                result = project.workspace_search(args.query, args.kind, args.limit)
+            elif args.command == 'workspace-refs':
+                result = project.workspace_references(args.ref)
+            elif args.command == 'progression-report':
+                result = project.progression()
+            elif args.command == 'reach-report':
+                result = project.reach(args.header, args.x, args.z, save=args.save, surf=args.surf,
+                                       conditional=not args.unconditional_only)
+            elif args.command == 'impact-report':
+                result = project.impact(**json.loads(args.request.read_text()))
+            elif args.command == "story-library":
                 result = project.story_library()
+            elif args.command == 'gameplay-data':
+                result = project.gameplay_data(args.header)
+            elif args.command == 'gameplay-areas':
+                result = project.gameplay_areas(args.search, args.offset, args.limit)
+            elif args.command == 'gameplay-species':
+                result = project.gameplay_species(args.species, args.form)
+            elif args.command == 'gameplay-catalog':
+                result = project.gameplay_catalog(args.kind, args.search, args.offset, args.limit)
+            elif args.command == 'gameplay-edit':
+                request = json.loads(args.request.read_text())
+                request.setdefault('header', args.header)
+                if args.dry_run:
+                    plan = project.plan_gameplay_edit(**request)
+                    result = {'revision': project.doc['revision'], 'empty': plan['empty'], 'preview': plan['preview']}
+                    if 'impact' in plan['transaction']:
+                        result['impact'] = plan['transaction']['impact']
+                else:
+                    if args.revision is None:
+                        p.error('gameplay-edit requires --revision unless --dry-run is given')
+                    result = project.apply_gameplay_edit(args.revision, **request)
+            elif args.command == 'field-view':
+                result = project.field_view()
+            elif args.command == 'travel-view':
+                result = project.travel_view()
+            elif args.command == 'petal-view':
+                result = project.petal_view()
+            elif args.command == 'repair-view':
+                result = project.repair_view()
+            elif args.command == 'pokemon-view':
+                result = project.pokemon_view()
+            elif args.command == 'group-view':
+                result = project.map_group_view()
+            elif args.command == 'env-view':
+                result = project.environment_view()
+            elif args.command == 'reuse':
+                from . import reuse
+                source = Project(args.source)
+                result = (reuse.plan(project, source, args.item) if args.revision is None
+                          else reuse.apply(project, source, args.item, args.revision))
+                result.pop('operations', None)
+            elif args.command == 'pokemon-stage':
+                result = project.stage_pokemon_source(args.source, args.key, args.display, args.template,
+                                                      args.icon_palette)
+            elif args.command == 'ground-view':
+                result = project.ground_view()
+            elif args.command == 'ground-stage':
+                result = project.stage_ground_source(args.source)
+            elif args.command == 'prop-view':
+                result = project.prop_view()
+            elif args.command == 'prop-stage':
+                result = project.stage_prop_source(args.source)
+            elif args.command == 'prop-edit':
+                request = json.loads(args.request.read_text())
+                operations = []
+                for op in request['operations']:
+                    if op.get('action') in ('register', 'revise') and 'source' in op:
+                        # Bake the folder now (same call as prop-stage); the package is written on apply.
+                        operations.append(project.stage_prop_source(Path(op['source']))['operation'])
+                    else:
+                        operations.append(op)
+                if args.dry_run:
+                    plan = project.plan_prop_edit(operations, request.get('label'), request.get('context'))
+                    result = {'revision': project.doc['revision'], 'empty': plan['empty'], 'preview': plan['preview']}
+                else:
+                    if args.revision is None:
+                        p.error('prop-edit requires --revision unless --dry-run is given')
+                    result = project.apply_prop_edit(args.revision, operations, request.get('label'), request.get('context'))
+            elif args.command == 'scene-report':
+                result = project.scene_report(args.key)
             elif args.command == "move-npc":
                 result = project.move_npc(args.id, args.x, args.z, args.revision)
             elif args.command == "move-placement":
@@ -215,6 +486,16 @@ def main(argv=None):
                                           limit=args.limit, offset=args.offset)
             elif args.command == "map-events":
                 result = project.map_events(header=args.header, matrix=args.matrix, cell=args.cell)
+            elif args.command == 'world-areas':
+                result = project.world_areas()
+            elif args.command == 'world-identity':
+                result = project.world_identity()
+            elif args.command == 'terrain-inspect':
+                result = project.terrain_view(args.header)
+            elif args.command == 'capacity':
+                result = project.capacity()
+            elif args.command == 'runtime-report':
+                result = project.runtime_report()
             elif args.command == 'npc-appearances':
                 from .npc_behavior import BEHAVIORS
                 result = {'appearances': project.npc_appearances(), 'behaviors': BEHAVIORS}

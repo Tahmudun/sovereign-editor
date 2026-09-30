@@ -90,6 +90,83 @@ def replace_file(blob, name, payload):
     return replace_file_id(blob, file_id, payload)
 
 
+BANNER_BYTES = {1: 0x840, 2: 0x940, 3: 0xA40, 0x103: 0x23C0}
+
+
+def _regions(blob):
+    """(start, end, file id or None) of everything the header and FAT declare."""
+    regions = []
+    for offset in (0x20, 0x30):
+        at, _, _, size = struct.unpack_from("<4I", blob, offset)
+        regions.append((at, at + size, None))
+    fnt, fnt_len, fat, fat_len, ov9, ov9_len, ov7, ov7_len = struct.unpack_from("<8I", blob, 0x40)
+    regions += [(fnt, fnt + fnt_len, None), (fat, fat + fat_len, None), (ov9, ov9 + ov9_len, None),
+                (ov7, ov7 + ov7_len, None)]
+    banner = struct.unpack_from("<I", blob, 0x68)[0]
+    if banner and banner + 2 <= len(blob):
+        regions.append((banner, banner + BANNER_BYTES.get(struct.unpack_from("<H", blob, banner)[0], 0x23C0), None))
+    for i in range(fat_len // 8):
+        a, b = struct.unpack_from("<II", blob, fat + 8 * i)
+        if b > a:
+            regions.append((a, b, i))
+    return regions
+
+
+def _append(result, payload, capacity):
+    target = (len(result) + 511) & ~511
+    end = target + len(payload)
+    require(end <= capacity, "Structural export exceeds this ROM's declared capacity", "ROM_CAPACITY")
+    result.extend(b"\xff" * (target - len(result)))
+    result.extend(payload)
+    return target, end
+
+
+def _grow_in_place(blob, file_id, start, payload):
+    """Grow a file where it lies when the files it would overlap are smaller than it: those
+    files move (unchanged) to the end first. None when relocating the file itself is better."""
+    from .character_runtime import file_by_id
+    need = start + len(payload)
+    try:
+        regions = _regions(blob)
+    except struct.error:
+        return None                       # a header/FAT that does not describe this file: refuse by capacity
+    blockers = [r for r in regions if r[2] != file_id and r[0] < need and r[1] > start]
+    if any(r[2] is None for r in blockers) or sum(r[1] - r[0] for r in blockers) >= len(payload):
+        return None
+    fat = struct.unpack_from("<I", blob, 0x48)[0]
+    capacity = 128 * 1024 << blob[0x14]
+    result = bytearray(blob)
+    moved = []
+    for a, b, i in sorted(blockers):
+        target, end = _append(result, bytes(blob[a:b]), capacity)
+        struct.pack_into("<II", result, fat + 8 * i, target, end)
+        moved.append({"file_id": i, "old_start": a, "start": target, "bytes": b - a})
+    require(need <= capacity, "Structural export exceeds this ROM's declared capacity", "ROM_CAPACITY")
+    if need > len(result):
+        result.extend(b"\xff" * (need - len(result)))
+    result[start:need] = payload
+    struct.pack_into("<II", result, fat + 8 * file_id, start, need)
+    struct.pack_into("<I", result, 0x80, max(struct.unpack_from("<I", blob, 0x80)[0], len(result)))
+    struct.pack_into("<H", result, 0x15E, crc16(result[:0x15E]))
+    # Original-prefix preservation: only the grown extent, the moved files' and this file's
+    # allocation entries and the two header fields may differ.
+    restored = bytearray(result[:len(blob)])
+    fields = [(start, len(payload)), (fat + 8 * file_id, 8), (0x80, 4), (0x15E, 2)]
+    fields += [(fat + 8 * m["file_id"], 8) for m in moved]
+    for offset, size in fields:
+        size = max(0, min(size, len(blob) - offset))
+        restored[offset:offset + size] = blob[offset:offset + size]
+    require(restored == blob, "Unexpected original ROM bytes changed during in-place growth")
+    require(file_by_id(result, file_id)[1] == payload, "Grown file readback differs")
+    for m in moved:
+        require(file_by_id(result, m["file_id"])[1] == blob[m["old_start"]:m["old_start"] + m["bytes"]],
+                "Moved file readback differs")
+    return bytes(result), {"relocated": False, "grown_in_place": True, "changed": True, "file_id": file_id,
+                           "start": start, "old_bytes": len(file_by_id(blob, file_id)[1]), "bytes": len(payload),
+                           "moved_files": moved, "appended_bytes": len(result) - len(blob),
+                           "original_prefix_preserved_except_metadata": True}
+
+
 def replace_file_id(blob, file_id, payload):
     """Same preservation rules for unnamed overlay files."""
     from .character_runtime import file_by_id
@@ -102,6 +179,12 @@ def replace_file_id(blob, file_id, payload):
         return bytes(result), {"relocated": False, "changed": True, "start": start,
                                "bytes": len(payload)}
     require(blob[0x12] == 0, "Structural exports support NTR ROMs only", "UNSUPPORTED_ROM")
+    if len(payload) > len(before) and ((len(blob) + 511) & ~511) + len(payload) > 128 * 1024 << blob[0x14]:
+        # Relocation (the historical rule, byte-identical for every earlier export) no longer fits
+        # the declared capacity: grow in place when the files in the way are smaller.
+        grown = _grow_in_place(blob, file_id, start, payload)
+        if grown is not None:
+            return grown
     fnt, fnt_len, fat, fat_len = struct.unpack_from("<4I", blob, 0x40)
     require(8 * (file_id + 1) <= fat_len, "Missing file allocation")
     target = (len(blob) + 511) & ~511

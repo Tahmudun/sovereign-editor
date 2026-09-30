@@ -72,8 +72,8 @@ def library_sources(project,context):
     if not hasattr(project,'_library_source_cache'):project._library_source_cache={}
     if key not in project._library_source_cache:
         entries=[];areas={};matrices={};seen=set()
-        for h in range(world.header_count(project.blob)):
-            head=world.read_header(project.blob,h,project.arm9)
+        for h in range(project.header_count()):
+            head=project.header(h)
             aid=head['area_data']
             if aid not in areas:areas[aid]=world.read_area_data(project.blob,aid)
             a=areas[aid];archive=world.INTERIOR_MODEL_ARCHIVE if a['area_type']==0 else world.BUILDING_MODEL_ARCHIVE
@@ -104,13 +104,13 @@ def templates(project,context,source,search='',images=False):
 def resource_users(project,context):
     if not hasattr(project, '_resource_users_versions'):
         project._resource_users_versions = {}
-    version = digest(project.arm9)
+    version = project.world_signature()
     if version in project._resource_users_versions:
         project._area_resource_users = project._resource_users_versions[version]
     if not hasattr(project,'_area_resource_users'):
         maps={};events={};scripts={};texts={};matrices={}
-        for h in range(world.header_count(project.blob)):
-            head=world.read_header(project.blob,h,project.arm9)
+        for h in range(project.header_count()):
+            head=project.header(h)
             events.setdefault(head['event_file'],[]).append(h);scripts.setdefault(head['script_file'],[]).append(h);texts.setdefault(head['text_archive'],[]).append(h)
             mid=head['matrix']
             if mid not in matrices:matrices[mid]=project.matrix_data(mid)

@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, QTimer
-from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QBrush, QColor, QFont, QKeySequence, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
     QGraphicsItem, QGraphicsScene, QGraphicsView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
@@ -295,7 +295,18 @@ class MapInspectorWindow(WorkflowControls, EventControls, SceneryControls, QMain
 
     # ---- widgets -------------------------------------------------------------
 
+    def _project_menu(self):
+        # Menu bar entries cost no width, so the compact 1180 px layout is unchanged.
+        menu = self.project_menu = self.menuBar().addMenu('Project')
+        for label, slot, shortcut in (('Project browser…', self.open_browser, 'Ctrl+B'),
+                                      ('Checkpoints and packages…', self.open_checkpoints, 'Ctrl+Shift+K')):
+            action = QAction(label, self)
+            action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(slot)
+            menu.addAction(action)
+
     def _layout(self):
+        self._project_menu()
         split = QSplitter()
         split.addWidget(self._browser())
         split.addWidget(self._scene_panel())
@@ -342,6 +353,10 @@ class MapInspectorWindow(WorkflowControls, EventControls, SceneryControls, QMain
         open_header.clicked.connect(self.open_header)
         header_row.addWidget(open_header)
         nav.addLayout(header_row)
+        world_button = QPushButton('World: areas, connections, terrain…')
+        world_button.setToolTip('Create areas from templates, connect entrances and edit terrain.')
+        world_button.clicked.connect(self.open_world)
+        nav.addWidget(world_button)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search name or map member…")
         self.search_input.returnPressed.connect(lambda: self.reload_cells(0))
@@ -402,6 +417,10 @@ class MapInspectorWindow(WorkflowControls, EventControls, SceneryControls, QMain
         self.subtitle_label.setWordWrap(True)
         titles.addWidget(self.subtitle_label)
         title_row.addLayout(titles, 1)
+        props_button = QPushButton('Custom props…')
+        props_button.setToolTip('Import, place, duplicate, move, remove and revise custom static props.')
+        props_button.clicked.connect(self.open_props)
+        title_row.addWidget(props_button)
         action_row = QHBoxLayout()
         action_row.setContentsMargins(12, 4, 12, 0)
         area = QPushButton('Author area…')
@@ -411,6 +430,10 @@ class MapInspectorWindow(WorkflowControls, EventControls, SceneryControls, QMain
         story = QPushButton('Characters & events…')
         story.clicked.connect(self.open_story_authoring)
         action_row.addWidget(story)
+
+        gameplay_button = QPushButton('Teams & encounters…')
+        gameplay_button.clicked.connect(self.open_gameplay)
+        action_row.addWidget(gameplay_button)
         layout_button = QPushButton('Edit layout')
         layout_button.clicked.connect(lambda: self.inspector_tabs.setCurrentIndex(2))
         action_row.addWidget(layout_button)
@@ -510,6 +533,41 @@ class MapInspectorWindow(WorkflowControls, EventControls, SceneryControls, QMain
             return
         from .story_ui import StoryEditor
         self.guard(lambda: StoryEditor(self).exec())
+
+    def open_checkpoints(self):
+        if self.wf.actions or self.event_pending() or self.scenery_action or self.staged_move() or self.staged_cells:
+            self.notice('Apply or cancel the current edit before managing checkpoints.', True)
+            return
+        from .recovery_ui import CheckpointsDialog
+        self.guard(lambda: CheckpointsDialog(self.project, self, on_changed=lambda: self.load_context(
+            self.header, list(self.cell) if hasattr(self, 'cell') else [0, 0])).exec())
+
+    def open_browser(self):
+        from .workspace_ui import ProjectBrowser
+        self.browser = self.guard(lambda: ProjectBrowser(self))
+        if self.browser:
+            self.browser.show()
+
+    def open_world(self):
+        if self.wf.actions or self.event_pending() or self.scenery_action or self.staged_move() or self.staged_cells:
+            self.notice('Apply or cancel the current edit before opening the world editor.', True)
+            return
+        from .world_ui import WorldEditor
+        self.guard(lambda: WorldEditor(self).exec())
+
+    def open_props(self):
+        if self.wf.actions or self.event_pending() or self.scenery_action or self.staged_move() or self.staged_cells:
+            self.notice('Apply or cancel the current edit before opening custom props.', True)
+            return
+        from .props_ui import PropEditor
+        self.guard(lambda: PropEditor(self).exec())
+
+    def open_gameplay(self):
+        if self.wf.actions or self.event_pending() or self.scenery_action or self.staged_move() or self.staged_cells:
+            self.notice('Apply or cancel the current edit before opening teams and encounters.', True)
+            return
+        from .gameplay_ui import GameplayEditor
+        self.guard(lambda: GameplayEditor(self.project, self, header=self.header).exec())
 
     def _inspector(self):
         right = QWidget()

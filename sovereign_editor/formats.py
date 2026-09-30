@@ -25,20 +25,111 @@ def digest(blob):
     return hashlib.sha256(blob).hexdigest()
 
 
+_IMMUTABLE_DIGEST = [None, None]     # (bytes object, sha256): the last immutable ROM image hashed
+
+
+def immutable_digest(blob):
+    """sha256 of an immutable ROM image, hashed once per object (whole-state validation
+    checks the pinned baseline several times per plan). Mutable buffers are always rehashed."""
+    if type(blob) is not bytes:
+        return digest(blob)
+    if _IMMUTABLE_DIGEST[0] is not blob:
+        _IMMUTABLE_DIGEST[:] = [blob, digest(blob)]
+    return _IMMUTABLE_DIGEST[1]
+
+
+def baseline_digest(project):
+    """Reuse Project's verified immutable image hash; simple format probes also work."""
+    cached = getattr(project, 'baseline_sha256', None)
+    return digest(project.blob) if cached is None else cached
+
+
 def span(blob, offset, size):
     require(offset >= 0 and size >= 0 and offset + size <= len(blob), "Record exceeds container bounds")
     return blob[offset:offset + size]
 
 
-def file_span(blob, name):
+_FNT = {}
+
+
+def _filenames(table):
+    """Parsed filename table, keyed by its own bytes (content-addressed, so any
+    ROM with a different table misses). Parsing dominated repeated lookups."""
+    folder = _FNT.get(table)
+    if folder is None:
+        folder = ndspy.fnt.load(table)
+        if len(_FNT) >= 8:
+            _FNT.pop(next(iter(_FNT)))
+        _FNT[table] = folder
+    return folder
+
+
+# Per immutable ROM image (compared by identity, like _IMMUTABLE_DIGEST): file spans
+# by name and parsed NARC member tables by archive. Lookups then slice only the
+# requested bytes instead of copying the filename table and a whole archive each
+# call (PROD-PERF-001). Mutable buffers are never cached.
+_ROM_TABLES = []
+_ROM_TABLE_LIMIT = 2
+
+
+def _rom_tables(blob):
+    if type(blob) is not bytes:
+        return None
+    for entry in _ROM_TABLES:
+        if entry[0] is blob:
+            return entry
+    entry = (blob, {}, {})
+    _ROM_TABLES.insert(0, entry)
+    del _ROM_TABLES[_ROM_TABLE_LIMIT:]
+    return entry
+
+
+def _file_bounds(blob, name):
+    tables = _rom_tables(blob)
+    if tables is not None and name in tables[1]:
+        return tables[1][name]
     require(len(blob) >= 0x200, "ROM is too short")
     fnt, fnt_len, fat, fat_len = struct.unpack_from("<4I", blob, 0x40)
-    filenames = ndspy.fnt.load(span(blob, fnt, fnt_len))
+    filenames = _filenames(bytes(span(blob, fnt, fnt_len)))
     index = filenames.idOf(name)
     require(index is not None and 8 * (index + 1) <= fat_len, f"ROM resource absent: {name}")
     start, end = struct.unpack_from("<II", span(blob, fat, fat_len), 8 * index)
     require(start <= end, "Invalid file allocation")
+    require(end <= len(blob), "Record exceeds container bounds")
+    if tables is not None:
+        tables[1][name] = (start, end)
+    return start, end
+
+
+def file_span(blob, name):
+    start, end = _file_bounds(blob, name)
     return start, span(blob, start, end - start)
+
+
+def _narc_table(blob, archive):
+    """(archive base, member data base, [(start, end)], count), validated as member_span does."""
+    tables = _rom_tables(blob)
+    if tables is not None and archive in tables[2]:
+        return tables[2][archive]
+    base, raw = file_span(blob, archive)
+    require(raw[:4] == b"NARC" and len(raw) >= 28, "Invalid NARC")
+    declared, header_size, blocks = struct.unpack_from("<IHH", raw, 8)
+    require(declared == len(raw) and header_size == 16 and blocks == 3, "Unsupported NARC layout")
+    require(raw[16:20] == b"BTAF", "NARC allocation table absent")
+    fat_size, count = struct.unpack_from("<IH", raw, 20)
+    require(fat_size >= 12 + 8 * count, "Invalid member index/table")
+    fnt = 16 + fat_size
+    require(span(raw, fnt, 4) == b"BTNF", "NARC filename block absent")
+    fnt_size = struct.unpack_from("<I", span(raw, fnt + 4, 4))[0]
+    image = fnt + fnt_size
+    require(span(raw, image, 4) == b"GMIF", "NARC image block absent")
+    image_size = struct.unpack_from("<I", span(raw, image + 4, 4))[0]
+    require(image + image_size == len(raw), "Unexpected NARC trailing data")
+    members = [struct.unpack_from("<II", raw, 28 + i * 8) for i in range(count)]
+    table = (base, image + 8, image_size - 8, members, count)
+    if tables is not None:
+        tables[2][archive] = table
+    return table
 
 
 def member_span(raw, index):
@@ -61,19 +152,22 @@ def member_span(raw, index):
 
 
 def resource(blob, archive, index):
-    base, raw = file_span(blob, archive)
-    offset, member = member_span(raw, index)
-    return base + offset, member
+    base, data, image_size, members, count = _narc_table(blob, archive)
+    require(0 <= index < count, "Invalid member index/table")
+    start, end = members[index]
+    require(start <= end and end <= image_size, "Member outside NARC image")
+    return base + data + start, blob[base + data + start:base + data + end]
 
 
 def member_count(blob, archive):
-    _, raw = file_span(blob, archive)
-    require(raw[:4] == b"NARC" and len(raw) >= 28, "Invalid NARC")
-    return struct.unpack_from("<H", span(raw, 24, 2))[0]
+    return _narc_table(blob, archive)[4]
 
 
 def arm9_code(blob):
     """Decompressed ARM9, cached per ROM so a project reads it once."""
+    # The same immutable ROM object again (the common case) skips re-hashing the compressed ARM9.
+    if type(blob) is bytes and _ARM9_LAST[0] is blob:
+        return _ARM9_LAST[1]
     require(len(blob) >= 0x40, "ROM is too short")
     start, _, _, size = struct.unpack_from("<4I", blob, 0x20)
     compressed = span(blob, start, size)
@@ -81,10 +175,13 @@ def arm9_code(blob):
     if key not in _ARM9_CACHE:
         _ARM9_CACHE.clear()
         _ARM9_CACHE[key] = ndspy.codeCompression.decompress(compressed)
+    if type(blob) is bytes:
+        _ARM9_LAST[:] = [blob, _ARM9_CACHE[key]]
     return _ARM9_CACHE[key]
 
 
 _ARM9_CACHE = {}
+_ARM9_LAST = [None, None]
 
 
 def map_sections(raw):

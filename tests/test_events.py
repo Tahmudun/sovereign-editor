@@ -15,6 +15,7 @@ import pytest
 from sovereign_editor import event_authoring, world
 from sovereign_editor.core import Project, atomic_json
 from sovereign_editor.formats import EditorError, resource
+from historical import exported
 
 CG = dict(header=67, cell=[17, 12])
 NB = dict(header=60, cell=[21, 12])
@@ -86,7 +87,7 @@ def test_noop_preview_save_reopen_and_undo(project):
 
 
 def test_export_combined_exact_preservation_and_net_zero(project,tmp_path):
-    accepted=Path('projects/map-scenery-1/exports/scenery-r13/game.nds').read_bytes()
+    accepted=exported('projects/map-scenery-1/exports/scenery-r13/game.nds')
     baseline=ndspy.rom.NintendoDSRom(accepted)
     apply(project)
     apply(project,'background',1,dict(x=553,z=396))

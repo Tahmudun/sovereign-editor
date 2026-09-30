@@ -9,11 +9,13 @@ import copy
 import struct
 from functools import lru_cache
 
-from .formats import digest, require, span, file_span
+from .formats import digest, immutable_digest, require, span, file_span
 
 BASELINE = 'b1ea4b20bbb1f1c22025ac159d390d60f76786ab530851b30ebad239cfa97d4d'
 PACKAGE_SCHEMA = 'sovereign-character-package-v1'
 MAX_CHARACTERS = 8
+MAX_CHARACTERS_V2 = 32   # resident layout v2 (PROD-CAP-001); classes 129..160, back groups 17..48
+MAX_TRAINERS_V2 = 64
 OVERWORLD_START = 7000
 FRONT_START = 129
 BACK_START = 17
@@ -105,18 +107,36 @@ def overlay(blob, overlay_id):
     return {'table_offset': offset, 'address': entry[1], 'file_id': entry[6], 'data': bytes(data)}
 
 
+# Overlay 131 (field extension, loaded at 0x023C8000) ends before the resident boot data region
+# 0x023D6260 (resident.BOOT_REGION): the region's image must survive every field visit.
+FIELD_LIMIT = 0xE260
+
+
 def thumb_bl(source, destination):
     delta = destination - source - 4
     require(delta % 2 == 0 and -(1 << 22) <= delta < (1 << 22), 'Character hook is outside Thumb BL range')
     return struct.pack('<HH', 0xf000 | ((delta >> 12) & 0x7ff), 0xf800 | ((delta >> 1) & 0x7ff))
 
 
-def bindings(blob, packages, trainer_count=0):
-    """Return guarded overlay/file patches and new archive members, without IO."""
-    if not packages:
+def bindings(blob, packages, trainer_count=0, practice=None, layout=None):
+    """Return guarded overlay/file patches and new archive members, without IO.
+
+    ``practice`` lists, per library trainer, whether it is a practice trainer.
+    None or all-practice keeps the historical range hook byte-for-byte.
+    ``layout`` (resident.Layout) selects resident layout v2: overlay-129 items are
+    allocated there (reclaiming the stock gender/prize tables) instead of appended,
+    and the practice selection over up to 64 slots is a byte table.
+    """
+    if not packages and not trainer_count:
         return {'files': {}, 'patches': [], 'appends': {}, 'characters': []}
-    require(digest(blob) == BASELINE, 'Character bindings are qualified only for the pinned baseline', 'UNSUPPORTED_RUNTIME')
-    require(1 <= len(packages) <= MAX_CHARACTERS, 'Character library supports at most eight entries', 'RESOURCE_CAPACITY')
+    require(immutable_digest(blob) == BASELINE, 'Character bindings are qualified only for the pinned baseline', 'UNSUPPORTED_RUNTIME')
+    # Trainers with stock classes need no character (a clean production project may have none);
+    # every character-specific table below is built only when characters exist.
+    if layout is None:
+        require(len(packages) <= MAX_CHARACTERS, 'Character library supports at most eight entries', 'RESOURCE_CAPACITY')
+    else:
+        require(len(packages) <= MAX_CHARACTERS_V2, f'Character library supports at most {MAX_CHARACTERS_V2} entries',
+                'RESOURCE_CAPACITY')
     packages = [validate_package(p) for p in packages]
     for archive, expected in ((OVERWORLD_ARCHIVE, 1553), (FRONT_ARCHIVE, 645), (BACK_ARCHIVE, 85)):
         raw = file_span(blob, archive)[1]
@@ -149,45 +169,84 @@ def bindings(blob, packages, trainer_count=0):
         data[i].extend(payload)
         return address
 
+    def resident(payload, name, align=4, kind='data', called_from=None):
+        if layout is None:
+            return append(129, payload)
+        address = layout.place(name, len(payload), align, kind, called_from=called_from)
+        layout.write(address, payload)
+        return address
+
+    def patch_resident(address, before, after):
+        if layout is None:
+            patch_overlay(129, address, before, after)
+        else:
+            layout.patch(address, before, after)
+
     count = len(packages)
-    old_ow = bytes(data[131][0x2260:0x2260 + 9900])
-    require(old_ow[-6:] == struct.pack('<3H', 65535, 0, 0), 'Overworld terminator differs')
-    ow_table = old_ow[:-6] + b''.join(struct.pack('<3H', OVERWORLD_START + i, 1553 + i, 0)
-                                     for i in range(count)) + old_ow[-6:]
-    ow_address = append(131, ow_table)
-    for i, addr in ((1, 0x21f92fc), (1, 0x21fa280), (131, 0x23c8f1c)):
-        patch_overlay(i, addr, struct.pack('<I', 0x23ca260), struct.pack('<I', ow_address))
-    gender_table = bytes(data[129][0x6d1b:0x6d1b + 129]) + bytes(p['gender'] == 'female' for p in packages)
-    gender_address = append(129, gender_table)
-    patch_overlay(129, 0x23dc19c, struct.pack('<I', 0x23ded1b), struct.pack('<I', gender_address))
-    patch_arm(0xffb90, struct.pack('<I', 0x23ded1b), struct.pack('<I', gender_address), 'character.gender-table')
-    money = bytes(data[129][0x72a4:0x72a4 + 516]) + b''.join(struct.pack('<2H', FRONT_START + i, 0) for i in range(count))
-    money_address = append(129, money)
-    for address, delta in ((0x223fc40, 0), (0x223fc44, 2)):
-        patch_overlay(12, address, struct.pack('<I', 0x23df2a4 + delta), struct.pack('<I', money_address + delta))
-    for address in (0x223fbd0, 0x223fbd4, 0x223fbdc):
-        patch_overlay(12, address, b'\x81\x2c', bytes((FRONT_START + count, 0x2c)))
-    # Sprite-resource selection calls this hook with (class, isLink). A new class
-    # maps to its own back group; every original class tail-calls the original
-    # function with arguments and return address intact. r3 is caller-saved.
-    code = struct.pack('<8H', 0x2881, 0xd304, 0x2800 | (FRONT_START + count), 0xd202,
-                       0x3881, 0x3011, 0x4770, 0x46c0)
-    code += struct.pack('<2HI', 0x4b00, 0x4718, 0x0207280d)
-    hook = append(129, code)
-    patch_arm(0x70d66, thumb_bl(0x02070d66, 0x0207280c), thumb_bl(0x02070d66, hook), 'character.partner-back')
-    require(type(trainer_count) is int and 0 <= trainer_count <= 32, 'Trainer capacity exceeded', 'RESOURCE_CAPACITY')
-    if trainer_count:
+    if packages:
+        old_ow = bytes(data[131][0x2260:0x2260 + 9900])
+        require(old_ow[-6:] == struct.pack('<3H', 65535, 0, 0), 'Overworld terminator differs')
+        ow_table = old_ow[:-6] + b''.join(struct.pack('<3H', OVERWORLD_START + i, 1553 + i, 0)
+                                         for i in range(count)) + old_ow[-6:]
+        ow_address = append(131, ow_table)
+        for i, addr in ((1, 0x21f92fc), (1, 0x21fa280), (131, 0x23c8f1c)):
+            patch_overlay(i, addr, struct.pack('<I', 0x23ca260), struct.pack('<I', ow_address))
+        gender_table = bytes(data[129][0x6d1b:0x6d1b + 129]) + bytes(p['gender'] == 'female' for p in packages)
+        money = bytes(data[129][0x72a4:0x72a4 + 516]) + b''.join(struct.pack('<2H', FRONT_START + i, 0) for i in range(count))
+        if layout is not None:
+            # Both stock tables are copied above and every reference is repointed
+            # below, so their space joins the v2 allocator.
+            layout.claim_stock_tables()
+        gender_address = resident(gender_table, 'character.gender', align=1)
+        patch_resident(0x23dc19c, struct.pack('<I', 0x23ded1b), struct.pack('<I', gender_address))
+        patch_arm(0xffb90, struct.pack('<I', 0x23ded1b), struct.pack('<I', gender_address), 'character.gender-table')
+        money_address = resident(money, 'character.prize-money')
+        for address, delta in ((0x223fc40, 0), (0x223fc44, 2)):
+            patch_overlay(12, address, struct.pack('<I', 0x23df2a4 + delta), struct.pack('<I', money_address + delta))
+        for address in (0x223fbd0, 0x223fbd4, 0x223fbdc):
+            patch_overlay(12, address, b'\x81\x2c', bytes((FRONT_START + count, 0x2c)))
+        # Sprite-resource selection calls this hook with (class, isLink). A new class
+        # maps to its own back group; every original class tail-calls the original
+        # function with arguments and return address intact. r3 is caller-saved.
+        code = struct.pack('<8H', 0x2881, 0xd304, 0x2800 | (FRONT_START + count), 0xd202,
+                           0x3881, 0x3011, 0x4770, 0x46c0)
+        code += struct.pack('<2HI', 0x4b00, 0x4718, 0x0207280d)
+        hook = resident(code, 'character.partner-back', kind='code', called_from=0x02070d66)
+        patch_arm(0x70d66, thumb_bl(0x02070d66, 0x0207280c), thumb_bl(0x02070d66, hook), 'character.partner-back')
+    require(type(trainer_count) is int and 0 <= trainer_count <= (32 if layout is None else MAX_TRAINERS_V2),
+            'Trainer capacity exceeded', 'RESOURCE_CAPACITY')
+    require(practice is None or (isinstance(practice, list) and len(practice) == trainer_count
+                                 and all(type(v) is bool for v in practice)), 'Invalid practice selection')
+    if trainer_count and (practice is None or all(practice)):
         # SetupAndStartTrainerBattle: r7 is opponent1, r4 is the selected type.
         # Add stock BATTLE_TYPE_11 only for our dedicated practice trainer IDs,
         # including multi battles. Preserve every other register and setup path.
         # ldr r0,base; cmp r7,r0; blo done; ldr r0,end; cmp; bhs done;
         # mov r0,1; lsl r0,11; orr r4,r0; done: mov r0,11; mov r1,r4; bx lr.
-        practice = struct.pack('<12H2I', 0x4805, 0x4287, 0xd305, 0x4805, 0x4287, 0xd202,
-                               0x2001, 0x02c0, 0x4304, 0x200b, 0x1c21, 0x4770,
-                               738, 738 + trainer_count)
-        address = append(129, practice)
+        code = struct.pack('<12H2I', 0x4805, 0x4287, 0xd305, 0x4805, 0x4287, 0xd202,
+                           0x2001, 0x02c0, 0x4304, 0x200b, 0x1c21, 0x4770,
+                           738, 738 + trainer_count)
+    elif trainer_count and any(practice) and layout is not None:
+        # v2: membership is a byte per library slot (up to 64), so slots 31/32/63
+        # and any mix are selected exactly; only r0/r1 change, as in v1.
+        from .resident import thumb
+        table = resident(bytes(practice), 'trainer.policy-table', align=1)
+        code = thumb([('ldr', 0, 738), 0x1A38, ('ldr', 1, trainer_count), 0x4288, ('b', 2, 'done'),
+                      ('ldr', 1, table), 0x5C09, 0x2900, ('b', 0, 'done'), 0x2001, 0x02C0, 0x4304,
+                      'done', 0x200B, 0x1C21, 0x4770], 0)
+    elif trainer_count and any(practice):
+        # Ordinary authored trainers keep the stock type (normal blackout on loss).
+        # Practice membership is an explicit bitmask over library slots:
+        # r0=r7-738; if r0>31 or !(mask>>r0 & 1) done; else r4|=BATTLE_TYPE_11.
+        mask = sum(1 << i for i, v in enumerate(practice) if v)
+        code = struct.pack('<14H2I', 0x4806, 0x1a38, 0x281f, 0xd806, 0x4905, 0x40c1, 0x07c9, 0xd002,
+                           0x2001, 0x02c0, 0x4304, 0x200b, 0x1c21, 0x4770, 738, mask)
+    else:
+        code = None
+    if code:
+        address = resident(code, 'trainer.policy', kind='code', called_from=0x020513ac)
         patch_arm(0x513ac, bytes.fromhex('0b20211c'), thumb_bl(0x020513ac, address), 'trainer.practice-return')
-    require(len(data[129]) <= 0x8000 and len(data[131]) <= 0x10000,
+    require(len(data[129]) <= 0x8000 and len(data[131]) <= FIELD_LIMIT,
             'Character runtime expansion exceeds its reserved memory', 'RESOURCE_CAPACITY')
     files = {}
     for i, payload in data.items():

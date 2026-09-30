@@ -12,6 +12,7 @@ import pytest
 from sovereign_editor.core import Project,atomic_json
 from sovereign_editor import nitro,mapscene,surface_authoring,surface_format,world,event_authoring
 from sovereign_editor.formats import EditorError,map_data
+from historical import exported
 
 CG=dict(header=67,cell=[17,12])
 
@@ -64,7 +65,7 @@ def display_lists(raw):
 
 
 def test_historical_export_repair_and_whole_undo(p,tmp_path):
-    prior=Path('projects/map-area-authoring-1/exports/area-r21/game.nds').read_bytes()
+    prior=exported('projects/map-area-authoring-1/exports/area-r21/game.nds')
     p.export(tmp_path/'prior',21);assert (tmp_path/'prior/game.nds').read_bytes()==prior
     original=p.path.read_bytes()
     ops=repair_operations()+[dict(kind='map',context=CG,request={'permissions':[dict(x=556,z=400,before='0080',after='0000')]}),

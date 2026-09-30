@@ -52,7 +52,14 @@ def test_stage_hide_flags_avoid_every_special_flag_range():
     # daily (cleared at each day change) and out-of-range flags cannot persist a stage.
     special = [(0x1, 0x40), (800, 800 + 231 + 0x78), (0x550, 0x95F), (0x960, 0xA9F), (0xAA0, 0xB5F), (0xB60, 0xFFFF)]
     assert len(sa.HIDE_FLAGS) == len(set(sa.HIDE_FLAGS)) >= 10
+    assert not [f for f in sa.HIDE_FLAGS_V1 for lo, hi in special if lo <= f <= hi]
+    # PROD-CAP-001 flags: the exact build computes trainer flags as 0x550 + trainer
+    # ID (ARM9 0x02040514), at most 0x871 with 64 authored trainers, so the event
+    # region 0x872..0x95F is outside the trainer window (storage_qualification).
+    trainer_window = (0x550, 0x550 + 738 + 64 - 1)
+    special = [s for s in special if s != (0x550, 0x95F)] + [trainer_window]
     assert not [f for f in sa.HIDE_FLAGS for lo, hi in special if lo <= f <= hi]
+    assert all(0x872 <= f <= 0x95F for f in sa.HIDE_FLAGS[len(sa.HIDE_FLAGS_V1):])
 
 
 def test_hide_flags_follow_the_replayed_state_not_the_live_document():

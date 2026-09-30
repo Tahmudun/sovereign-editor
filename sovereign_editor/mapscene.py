@@ -65,7 +65,28 @@ def describe_model(model_id, name):
             "display": f"{label} · {name} ({model_id})" if label else f"{name} (model {model_id})"}
 
 
-def tilesets(project, context):
+def tilesets(project, context, state=None):
+    """Area tileset bytes plus their exact archive/member references.
+
+    With project ground materials (ground_materials.py) the map tileset is the superset
+    the export builds for the area data; ``state`` is the composed state during
+    composition (defaults to the project's)."""
+    blobs_refs = _stock_tilesets(project, context)
+    from . import ground_materials
+    if state is None and getattr(project, '_composed_cache', None) is not None:
+        state = project._composed_cache
+    if (state is not None and blobs_refs[1]['map_tileset'] is not None
+            and (ground_materials.materials(state) or state.get('terrain_features') and
+                 context['area_data']['id'] in ground_materials.fall_areas(project, state))):
+        refs, blobs = blobs_refs
+        blobs = dict(blobs)
+        blobs['map_tileset'] = ground_materials.editor_tileset(project, state, context['area_data']['id'],
+                                                               blobs['map_tileset'])
+        return refs, blobs
+    return blobs_refs
+
+
+def _stock_tilesets(project, context):
     """Area tileset bytes plus their exact archive/member references.
 
     Each tileset is resolved independently and never raises: one missing texture
@@ -106,6 +127,14 @@ def terrain_model(project, context, tileset):
 
 
 def building_model(project, archive, model_id, tileset):
+    from . import props
+    custom = props.editor_model(project, model_id) if archive == world.BUILDING_MODEL_ARCHIVE else None
+    if custom is not None:
+        # Custom props bind by name to the project-owned extended building tileset the
+        # export builds; stock resolution (and its digests) stays unchanged.
+        summary, primitives = decode_model(custom, tileset=props.editor_tileset(project, tileset))
+        return {"archive": archive, "member": model_id, "rom_offset": -1, "bytes": len(custom),
+                "sha256": digest(custom), "custom_prop": True}, summary, primitives
     require(model_id < member_count(project.blob, archive),
             f"Building model {model_id} is absent from {archive}", "NOT_FOUND")
     offset, raw = resource(project.blob, archive, model_id)

@@ -65,8 +65,46 @@ def counts(raw):
 
 def encode(triangles, matrix, scale, width,height):
     require(triangles, 'Cannot empty a material shape')
-    commands=[(0x40,struct.pack('<I',0))]
-    inv=np.linalg.inv(matrix);last_color=last_normal=last_uv=None
+    inv=np.linalg.inv(matrix)
+    if not np.array_equal(inv,np.eye(4)):
+        return _encode_transformed(triangles,inv,scale,width,height)
+    # Identity node transform (every writable map model): all per-vertex values are
+    # computed at once, elementwise, exactly as one vertex at a time.
+    V=np.concatenate([np.asarray(t) for t in triangles])
+    coords=np.rint(V[:,:3]/scale*4096).astype(int)
+    uvs=np.rint(V[:,3:5]*[width,height]*16).astype(int)
+    bad=[np.any((coords<-32768)|(coords>32767),axis=1),np.any((uvs<-32768)|(uvs>32767),axis=1)]
+    failing=np.nonzero(bad[0]|bad[1])[0]
+    if len(failing):
+        require(not bad[0][failing[0]],'Vertex outside VTX_16 range')
+        require(False,'UV outside TEXCOORD range')
+    cols=np.clip(np.rint(V[:,5:8]*31),0,31).astype(int)
+    colors=(cols[:,0]|cols[:,1]<<5|cols[:,2]<<10).tolist();normals=V[:,8].astype(np.int64).tolist()
+    packed=(np.all(coords%64==0,axis=1)&np.all(coords//64>=-512,axis=1)&np.all(coords//64<=511,axis=1)).tolist()
+    small=(((coords//64)&1023)<<np.array([0,10,20])).sum(axis=1).tolist()
+    coords_l=coords.tolist();uvs_l=uvs.tolist()
+    commands=[(0x40,struct.pack('<I',0))];last_color=last_normal=last_uv=None
+    for k in range(len(V)):
+        color,normal,uv=int(colors[k]),int(normals[k]),tuple(uvs_l[k])
+        if color!=last_color:commands.append((0x20,struct.pack('<I',color)));last_color=color
+        if normal!=last_normal:commands.append((0x21,struct.pack('<I',normal)));last_normal=normal
+        if uv!=last_uv:commands.append((0x22,struct.pack('<2h',*uv)));last_uv=uv
+        if packed[k]:commands.append((0x24,struct.pack('<I',int(small[k]))))
+        else:commands.append((0x23,struct.pack('<3hH',*coords_l[k],0)))
+    return _pack(commands)
+
+
+def _pack(commands):
+    commands=commands+[(0x41,b'')];result=bytearray()
+    for i in range(0,len(commands),4):
+        packet=commands[i:i+4]
+        result.extend(bytes(c for c,_ in packet)+bytes(4-len(packet)))
+        for _,params in packet:result.extend(params)
+    return bytes(result)
+
+
+def _encode_transformed(triangles, inv, scale, width, height):
+    commands=[(0x40,struct.pack('<I',0))];last_color=last_normal=last_uv=None
     for tri in triangles:
         for v in tri:
             xyz=(inv@np.r_[v[:3],1])[:3]/scale
@@ -83,16 +121,11 @@ def encode(triangles, matrix, scale, width,height):
                 value=sum((int(c//64)&1023)<<shift for c,shift in zip(coords,(0,10,20)))
                 commands.append((0x24,struct.pack('<I',value)))
             else:commands.append((0x23,struct.pack('<3hH',*coords,0)))
-    commands.append((0x41,b''));result=bytearray()
-    for i in range(0,len(commands),4):
-        packet=commands[i:i+4]
-        result.extend(bytes(c for c,_ in packet)+bytes(4-len(packet)))
-        for _,params in packet:result.extend(params)
-    return bytes(result)
+    return _pack(commands)
 
 
 def paint(raw,tileset,rect,height,donor_shape,storage_base=None):
-    summary,prims=nitro.decode_model(raw,tileset=tileset)
+    summary,prims=nitro.decode_model(raw,tileset=tileset,render=False)
     bo,mo,model,shape,draws=layout(raw)
     require(all(np.allclose(m,np.eye(4)) for _,_,m in draws),'Surface writing requires identity node transforms')
     by_shape={sid:p for (sid,_,_),p in zip(draws,prims)}
@@ -107,6 +140,8 @@ def paint(raw,tileset,rect,height,donor_shape,storage_base=None):
     for sid,p in enumerate(prims):
         arr=np.column_stack([p.vertices,p.uvs,p.colors,p.normals]);bt=[arr[t].copy() for t in p.triangles];at=[]
         for tri in bt:
+            if tri[:,0].max()<=rect[0] or tri[:,0].min()>=rect[2] or tri[:,2].max()<=rect[1] or tri[:,2].min()>=rect[3]:
+                at.append(tri);continue       # cannot cover positive area inside rect
             outside,inside=pieces(list(tri),rect)
             inner=tris(inside) if len(inside)>=3 else []
             projected=sum(abs(np.cross(t[1,:3]-t[0,:3],t[2,:3]-t[0,:3])[1])/2 for t in inner)
@@ -166,5 +201,5 @@ def paint(raw,tileset,rect,height,donor_shape,storage_base=None):
     struct.pack_into('<I',result,0,len(result));struct.pack_into('<I',result,16,len(result))
     output=bytearray(raw[:bo+mo])+result
     struct.pack_into('<I',output,bo+4,len(output)-bo);struct.pack_into('<I',output,8,len(output))
-    desc,read=nitro.decode_model(bytes(output),tileset=tileset)
+    desc,read=nitro.decode_model(bytes(output),tileset=tileset,render=False)
     return bytes(output),{'changed_shapes':sorted(changed),'area':area/256,'before_bytes':len(raw),'after_bytes':len(output),'vertices':desc['vertices']}

@@ -10,6 +10,7 @@ import pytest
 from sovereign_editor.core import Project,atomic_json
 from sovereign_editor.formats import EditorError,resource,map_data
 from sovereign_editor import dialogue_format as fmt,world,area_layout,surface_authoring
+from historical import exported
 
 CG=dict(header=67,cell=[17,12])
 
@@ -51,7 +52,7 @@ def test_surface_and_dialogue_preview_save_reopen_atomic_undo(p):
 
 
 def test_export_independent_message_script_event_model_and_netzero(p,tmp_path):
-    accepted=Path('projects/map-events-1/exports/events-r18/game.nds').read_bytes()
+    accepted=exported('projects/map-events-1/exports/events-r18/game.nds')
     prior=ndspy.rom.NintendoDSRom(accepted)
     apply(p,[surface(),npc()]);identity=p.simple_interactions(**CG)[0]['identity']
     out=tmp_path/'authored';p.export(out,p.doc['revision']);rom=ndspy.rom.NintendoDSRom((out/'game.nds').read_bytes())

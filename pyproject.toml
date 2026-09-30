@@ -4,16 +4,25 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sovereign-editor"
-version = "0.4.0"
+version = "0.5.0"
 description = "Native Mac world editor with a shared agent CLI"
+readme = "README.md"
+license = {file = "LICENSE"}
 requires-python = ">=3.11"
 dependencies = ["ndspy==4.1.0", "Pillow==11.3.0", "numpy==2.2.6", "PySide6-Essentials==6.8.3"]
+
+[project.urls]
+Repository = "https://github.com/Tahmudun/sovereign-editor"
+Issues = "https://github.com/Tahmudun/sovereign-editor/issues"
 
 [project.scripts]
 sovereign = "sovereign_editor.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["sovereign_editor*"]
+
 [tool.setuptools.package-data]
-sovereign_editor = ["assets/cherrygrove/*", "assets/dialogue-chars.json"]
+sovereign_editor = ["assets/cherrygrove/profile.json", "assets/cherrygrove/preview-hashes.json", "assets/cherrygrove/stock-models.json", "assets/dialogue-chars.json", "native/*.c"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

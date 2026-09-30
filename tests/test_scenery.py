@@ -15,6 +15,7 @@ import pytest
 from sovereign_editor.core import Project, atomic_json
 from sovereign_editor.formats import EditorError, resource, map_sections
 from sovereign_editor import world
+from historical import exported
 
 CG = dict(header=67, cell=[17, 12])
 NB = dict(header=60, cell=[21, 12])
@@ -98,15 +99,15 @@ def test_grown_export_preserves_all_files_and_member_sections(project, tmp_path)
     for i,(a,b) in enumerate(zip(base_narc.files,narc.files)):
         if i not in (0,5): assert a==b
     # All files except map/event archives are exact; verify event archive against accepted r8.
-    accepted=ndspy.rom.NintendoDSRom(Path('projects/map-adjacent-1/exports/adjacent-and-sign-r8/game.nds').read_bytes())
-    for i,(a,b) in enumerate(zip(accepted.files,rom.files)):
-        if i!=rom.filenames.idOf(world.MAP_ARCHIVE): assert a==b
     assert len(output)==struct.unpack_from('<I',output,0x80)[0]
     from ndspy._common import crc16
     assert struct.unpack_from('<H',output,0x15e)[0]==crc16(output[:0x15e])
     project.undo(project.doc['revision'])
     restored=project.export(tmp_path/'undo',project.doc['revision'])
     assert restored['candidate_sha256']=='ad3735d0c770395fd30e3c7081e62bcc8292a41a3419348f02eb4a5af22f17b6'
+    accepted=ndspy.rom.NintendoDSRom(exported('projects/map-adjacent-1/exports/adjacent-and-sign-r8/game.nds'))
+    for i,(a,b) in enumerate(zip(accepted.files,rom.files)):
+        if i!=rom.filenames.idOf(world.MAP_ARCHIVE): assert a==b
 
 
 def test_delete_before_sign_keeps_binding(project,tmp_path):

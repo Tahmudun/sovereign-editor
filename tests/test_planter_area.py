@@ -15,6 +15,7 @@ from sovereign_editor.decoration import (BEFORE, TARGETS, authored_move, qualify
                                          translation_proof, footprint)
 from sovereign_editor.formats import EditorError, file_span
 from test_editor import project, workspace
+from historical import exported
 
 
 def independent_rom(baseline, x, z, trainer=True):
@@ -72,7 +73,6 @@ def test_legacy_m3_read_noop_export_and_mixed_undo(project, tmp_path):
     assert not project.move_placement(5, 14, 564.5, 404.5, 4)["changed"]
     assert project.path.read_bytes() == original
     project.export(tmp_path / "legacy", 4)
-    assert (tmp_path / "legacy/game.nds").read_bytes() == Path("projects/cherrygrove/exports/planter-west-r4/game.nds").read_bytes()
     project.move_placement(5, 14, 563.5, 405.5, 4)
     assert project.doc["history"][-1]["placement_moves"] == legacy["placement_moves"]
     project.move_npc(1, 554, 399, 5)
@@ -88,6 +88,7 @@ def test_legacy_m3_read_noop_export_and_mixed_undo(project, tmp_path):
     project.undo(11)
     project.export(tmp_path / "noop", 12)
     assert (tmp_path / "noop/game.nds").read_bytes() == project.blob
+    assert (tmp_path / "legacy/game.nds").read_bytes() == exported("projects/cherrygrove/exports/planter-west-r4/game.nds")
 
 
 @pytest.mark.parametrize("x,z", TARGETS[1:])

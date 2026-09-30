@@ -43,6 +43,11 @@ def validate_fields(s):
     else:require(rx>0 and rz>0,'Wandering needs a positive range on both axes','INVALID_INPUT')
 
 
+# Plain ground, tall grass and cave floor (TILE_BEHAVIOR_CAVE_FLOOR 0x08: stock cave NPCs, e.g.
+# D41R0104's (5,4), stand on it; editor v1 cave family floors use it).
+WALKABLE=(0x00,0x02,0x08)
+
+
 def validate_area(project,context,s,state,rows,*,height_at=None):
     from . import world,scenery
     validate_fields(s)
@@ -53,7 +58,7 @@ def validate_area(project,context,s,state,rows,*,height_at=None):
         for z in range(s['z']-s.get('range_z',0),s['z']+s.get('range_z',0)+1):
             offset=world.cell_offset(context,x,z)
             pair=state['permissions'].get((context['map_member'],offset),raw[offset:offset+2])
-            require(not world.is_blocked(pair) and pair[0] in (0,2),
+            require(not world.is_blocked(pair) and pair[0] in WALKABLE,
                     f'NPC movement area reaches blocked or special terrain at {x},{z}','BLOCKED_TILE')
             require(height_at(project,context,{'x':x,'z':z})==height,
                     f'NPC movement area changes height at {x},{z}','UNSUPPORTED_HEIGHT')

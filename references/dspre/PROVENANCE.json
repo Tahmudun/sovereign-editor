@@ -2,7 +2,7 @@
   "upstream": "https://github.com/DS-Pokemon-Rom-Editor/DSPRE",
   "commit": "249a278186d80c35f04485b2c1b612bd81b90a74",
   "license": "AGPL-3.0; see LICENSE",
-  "status": "unmodified reference source, not yet ported into product",
+  "status": "Unmodified reference source; Python map, placement and event-format implementations adapt these layouts. See THIRD_PARTY_NOTICES.md.",
   "files": [
     {
       "path": "DS_Map/ROMFiles/AreaData.cs",

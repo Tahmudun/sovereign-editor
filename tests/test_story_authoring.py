@@ -9,6 +9,7 @@ from sovereign_editor.core import Project
 from sovereign_editor.formats import EditorError,resource,digest
 from sovereign_editor import story_authoring as story,character_runtime as cr,dialogue_format as fmt
 from tools.tiana_encounter import operations,CONTEXT
+from historical import exported
 
 ROOT=Path(__file__).resolve().parents[1]
 
@@ -47,7 +48,7 @@ def test_reopen_noop_stale_and_tamper(p):
 def test_export_preservation_script_allocations_and_undo_redo(p,tmp_path):
     base=Project(ROOT/'projects/map-workflow-1');save=ROOT/'projects/map-workflow-1/exports/workflow-r23/game.sav'
     out=tmp_path/'first';p.export(out,p.doc['revision'],save);raw=(out/'game.nds').read_bytes();rom=ndspy.rom.NintendoDSRom(raw)
-    prior=ndspy.rom.NintendoDSRom((ROOT/'projects/map-workflow-1/exports/workflow-r23/game.nds').read_bytes())
+    prior=ndspy.rom.NintendoDSRom(exported(ROOT/'projects/map-workflow-1/exports/workflow-r23/game.nds'))
     def narc(r,path):return ndspy.narc.NARC(r.getFileByName(path)).files
     for path,extra in ((cr.OVERWORLD_ARCHIVE,1),(cr.FRONT_ARCHIVE,5),(cr.BACK_ARCHIVE,5),(story.TRAINER_ARCHIVE,3),(story.PARTY_ARCHIVE,3)):
         a,b=narc(prior,path),narc(rom,path);assert b[:len(a)]==a and len(b)==len(a)+extra

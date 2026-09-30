@@ -29,9 +29,13 @@ def encode_message(text):
     require(isinstance(text,str) and 1<=len(text)<=200, 'Dialogue needs a short page', 'INVALID_INPUT')
     # A bounded semantic span, not an arbitrary control-code escape. Native
     # FF00 color index 1 uses the existing field palette; reset to index 0.
-    parts=re.split(r'(\[/?hint\])',text);visible='';codes=[];highlight=False
+    # [mon] is the stock party-nickname buffer 0 (text bank 211 "{STRVAR_1 1, 0}
+    # used Cut!": FFFE 0100, two arguments 0 0); it is budgeted as ten characters.
+    parts=re.split(r'(\[/?hint\]|\[mon\])',text);visible='';codes=[];highlight=False
     for part in parts:
-        if part=='[hint]':
+        if part=='[mon]':
+            visible+='M'*10;codes.extend((0xfffe,0x0100,2,0,0))
+        elif part=='[hint]':
             require(not highlight,'Hint spans cannot nest','INVALID_INPUT');highlight=True
             codes.extend((0xfffe,0xff00,1,1))
         elif part=='[/hint]':
@@ -56,7 +60,7 @@ def append_messages(raw,messages,limit=256):
     result=bytearray(struct.pack('<HH',count+len(messages),key)+b'\0'*(8*(count+len(messages)))+raw[end:])
     allocations=[(offset+extra,length) for offset,length,_ in entries]
     for i,text in enumerate(messages,count):
-        chars=encode_message(text);offset=len(result)
+        chars=(encode_pages(text,wait=isinstance(text,Held)) if isinstance(text,list) else encode_message(text));offset=len(result)
         cipher=[c^(((i+1)*596947+j*18749)&65535) for j,c in enumerate(chars)]
         result.extend(struct.pack('<'+'H'*len(cipher),*cipher));allocations.append((offset,len(chars)))
     for i,(offset,length) in enumerate(allocations):
@@ -88,16 +92,66 @@ def talk_script(message,kind):
     return code+struct.pack('<HB4H',45 if kind=='npc' else 44,message,50,53,97,2)
 
 
-def append_scripts(raw,scripts):
+def append_scripts(raw,scripts,align=None):
+    """Append script bodies after the stock ones.
+
+    align gives each script's required start alignment (default 1). Movement data
+    is 4-aligned inside a compiled scene script, like native `.balign 4`, so that
+    script must also start 4-aligned in the file: the ARM9 reads movement commands
+    with LDRH, which ignores bit 0 of an odd address. Entries grow in 4-byte steps,
+    so earlier bodies keep their alignment.
+    """
     if not scripts:return raw
+    align=[1]*len(scripts) if align is None else list(align)
+    require(len(align)==len(scripts) and all(a in (1,2,4) for a in align),'Invalid script alignment')
     end,entries=script_entries(raw);extra=4*len(scripts)
     require(len(entries)+len(scripts)<1000,'Local script IDs exhausted','UNSUPPORTED_SCRIPT')
     result=bytearray(b'\0'*(4*(len(entries)+len(scripts)))+b'\x13\xfd'+raw[end:])
     targets=[offset+extra for offset in entries]
-    for code in scripts:
+    for code,a in zip(scripts,align):
+        result.extend(b'\0'*(-len(result)%a))
         targets.append(len(result));result.extend(code)
     for i,target in enumerate(targets):struct.pack_into('<I',result,4*i,target-4*i-4)
     new_end,new_entries=script_entries(result)
     require(result[new_end:new_end+len(raw)-end]==raw[end:] and new_entries==targets,
             'Stock script body or targets changed')
+    return bytes(result)
+
+
+PAGE_BREAK = 0x25BC   # stock trainer text (bank 728): wait, then continue in a fresh box
+
+
+class Held(list):
+    """Pages whose last page also waits for a button, as every stock trainer intro does
+    (bank 728 types 0/3/7 end with PAGE_BREAK): the battle starts only after the press."""
+
+
+def encode_pages(pages, wait=False):
+    """One native message of several authored pages (each checked like a single page)."""
+    require(isinstance(pages, list) and 1 <= len(pages) <= 4, 'A message needs 1..4 pages', 'INVALID_INPUT')
+    codes = []
+    for i, page in enumerate(pages):
+        if i:
+            codes.append(PAGE_BREAK)
+        codes.extend(encode_message(page)[:-1])
+    return codes + ([PAGE_BREAK] if wait else []) + [0xffff]
+
+
+def alias_scripts(raw, count, source=0):
+    """Extend the entry table to ``count`` entries whose new members run entry ``source``.
+
+    Existing entries keep their targets; bodies move by the table growth (a multiple of
+    four, so movement-data alignment is kept; script jumps are relative).
+    """
+    end, entries = script_entries(raw)
+    if count <= len(entries):
+        return raw
+    require(count < 1000, 'Local script IDs exhausted', 'UNSUPPORTED_SCRIPT')
+    extra = 4 * (count - len(entries))
+    result = bytearray(b'\0' * (4 * count) + b'\x13\xfd' + raw[end:])
+    targets = [offset + extra for offset in entries] + [entries[source] + extra] * (count - len(entries))
+    for i, target in enumerate(targets):
+        struct.pack_into('<I', result, 4 * i, target - 4 * i - 4)
+    new_end, new_entries = script_entries(bytes(result))
+    require(bytes(result[new_end:]) == raw[end:] and new_entries == targets, 'Stock script body or targets changed')
     return bytes(result)

@@ -30,7 +30,7 @@ def base(project, member):
     if not hasattr(project, '_event_cache'):
         project._event_cache = {}
     if member not in project._event_cache:
-        project._event_cache[member] = resource(project.blob, world.EVENT_ARCHIVE, member)[1]
+        project._event_cache[member] = project.resource(world.EVENT_ARCHIVE, member)[1]
     return project._event_cache[member]
 
 
@@ -67,8 +67,9 @@ def raw_member(project, member, state):
         if m == member:
             raw[offset:offset + len(value)] = value
     from .simple_interactions import append_events
-    from . import story_authoring
-    return story_authoring.append_events(project, member, state, append_events(project, member, state, bytes(raw)))
+    from . import story_authoring, world_authoring
+    raw = world_authoring.append_warps(project, member, state, bytes(raw))
+    return story_authoring.append_events(project, member, state, append_events(project, member, state, raw))
 
 
 def lookup(project, member, kind, event_id, state):
@@ -112,7 +113,7 @@ def location(project, header, x, z):
 
 
 def endpoint(project, header, event_id, state):
-    head = world.read_header(project.blob, header, project.arm9)
+    head = project.header(header)
     record = lookup(project, head['event_file'], 'warp', event_id, state)
     context = location(project, header, record['x'], record['z'])
     return context, record
@@ -163,8 +164,8 @@ def view(project, context, state):
     head = context['header']
     if not hasattr(project, '_event_users'):
         project._event_users = {}
-        for i in range(world.header_count(project.blob)):
-            h = world.read_header(project.blob, i, project.arm9)
+        for i in range(project.header_count()):
+            h = project.header(i)
             project._event_users.setdefault(h['event_file'], []).append(i)
     return {'context': authoring.context_ref(context), 'member': member,
             'shared_headers': project._event_users[member], 'events': result,
@@ -179,7 +180,7 @@ def dependencies(project, contexts, index):
         refs = [(world.EVENT_ARCHIVE, head['event_file']), ('a/0/1/2', head['script_file']),
                 ('a/0/1/2', head['level_script']), ('a/0/2/7', head['text_archive'])]
         result.append({'context': authoring.dependencies(context, index),
-                       'resources': [{'archive': a, 'member': m, 'sha256': digest(resource(project.blob, a, m)[1])}
+                       'resources': [{'archive': a, 'member': m, 'sha256': digest(project.resource(a, m)[1])}
                                      for a, m in refs]})
     return result
 
@@ -297,6 +298,8 @@ def validate_final(project, state):
 def final_patches(project, state):
     patches = []
     for (member, offset), after in sorted(state['event_records'].items()):
+        if project.created_member(world.EVENT_ARCHIVE, member):
+            continue  # created members are written whole, with their records
         rom_offset, raw = resource(project.blob, world.EVENT_ARCHIVE, member)
         before = raw[offset:offset + len(after)]
         if before != after:

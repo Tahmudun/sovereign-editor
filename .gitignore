@@ -150,3 +150,8 @@ dist/
 /CLAUDE.md
 /docs/*
 !/docs/DEVELOPMENT.md
+
+# Publication-only exclusions: private transfer helpers and generated native output.
+/scripts/
+/tools/opus_worker.py
+/sovereign_editor/native/scene_collect.json

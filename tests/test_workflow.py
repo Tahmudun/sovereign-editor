@@ -11,6 +11,7 @@ from sovereign_editor.core import Project, atomic_json
 from sovereign_editor.formats import EditorError
 from sovereign_editor import world, workflow
 from sovereign_editor.workflow_session import WorkflowSession
+from historical import exported as historical_rom
 
 ROOM = {'header': 72, 'cell': [0, 0]}
 CG = {'header': 67, 'cell': [17, 12]}
@@ -61,7 +62,7 @@ def test_room_copy_preview_reopen_undo_redo_export_isolation(p, tmp_path):
     assert q.contexts(header=72)['cells'][0]['map_member'] == 676
     assert q.map_neighborhood(**ROOM, image=False)['cells'][0]['map_member'] == 676
     q.export(tmp_path / 'new', q.doc['revision'])
-    original = Path('projects/npc-behavior-1/exports/behavior-r22/game.nds').read_bytes()
+    original = historical_rom('projects/npc-behavior-1/exports/behavior-r22/game.nds')
     exported = (tmp_path / 'new/game.nds').read_bytes()
     a, b = ndspy.rom.NintendoDSRom(original), ndspy.rom.NintendoDSRom(exported)
     for archive, addition in ((world.MAP_ARCHIVE, 1), (world.MATRIX_ARCHIVE, 1)):

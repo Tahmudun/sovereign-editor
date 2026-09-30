@@ -10,8 +10,19 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import authoring, world, sign_interaction, scenery, event_authoring, surface_authoring, simple_interactions, interiors, linked_groups, story_authoring
-from .formats import (ASSETS, EditorError, arm9_code, digest, events, map_data, map_sections,
+from . import authoring, world, sign_interaction, scenery, event_authoring, surface_authoring, simple_interactions, interiors, linked_groups, story_authoring, scene_authoring
+from . import gameplay, world_authoring, snapshots, terrain_authoring, game_data
+from . import props as custom_props
+from . import ground_materials
+from . import decals as ground_decals
+from . import travel_points
+from . import field_features
+from . import petal_effect
+from . import runtime_repairs
+from . import pokemon_packages
+from . import map_groups
+from . import environments
+from .formats import (ASSETS, EditorError, arm9_code, digest, immutable_digest, events, map_data, map_sections,
                       qualify, require, resource)
 from .decoration import (BASELINE as DECORATION_BASELINE, KEY as DECORATION_KEY, BEFORE,
                          qualify_move, qualify_area, translation_proof, authored_move, footprint, require_target)
@@ -39,10 +50,16 @@ def _require_disjoint(authored, qualified):
 
 
 def atomic_json(path, value):
+    """Durable replace. A dict is written one top-level key per line with compact values:
+    the C encoder is several times faster than indent=2 for a history-bearing project."""
     fd, temp = tempfile.mkstemp(prefix=".project-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(value, f, indent=2)
+            if isinstance(value, dict) and value:
+                items = [f"  {json.dumps(k)}: {json.dumps(v)}" for k, v in value.items()]
+                f.write("{\n" + ",\n".join(items) + "\n}")
+            else:
+                json.dump(value, f, indent=2)
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
@@ -52,12 +69,40 @@ def atomic_json(path, value):
             os.unlink(temp)
 
 
+def _clone(value):
+    """Independent copy of plain JSON-like data (dict/list/tuple of scalars); several times
+    faster than copy.deepcopy for the contexts that whole-state validation requests."""
+    kind = type(value)
+    if kind is dict:
+        return {k: _clone(v) for k, v in value.items()}
+    if kind is list:
+        return [_clone(v) for v in value]
+    if kind is tuple:
+        return tuple(_clone(v) for v in value)
+    if kind in (int, str, float, bool, bytes) or value is None:
+        return value
+    return copy.deepcopy(value)
+
+
 class Project:
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.path = self.root / "project.json"
         require(self.path.is_file() and not self.path.is_symlink(), "Choose a Sovereign Editor project folder", "PROJECT_NOT_FOUND")
         self._read()
+
+    @property
+    def baseline_sha256(self):
+        """Cache only an immutable in-memory ROM; disk rereads replace that object."""
+        blob = self.blob
+        if type(blob) is not bytes:
+            return digest(blob)
+        cached = getattr(self, '_baseline_digest_cache', None)
+        if cached is None or cached[0] is not blob:
+            # Shared with formats.immutable_digest: one hash per ROM object, not two.
+            cached = (blob, immutable_digest(blob))
+            self._baseline_digest_cache = cached
+        return cached[1]
 
     @classmethod
     def create(cls, rom_path, root, name="Cherrygrove workspace"):
@@ -85,7 +130,7 @@ class Project:
         baseline = self.root / "baseline.nds"
         require(not baseline.is_symlink(), "Baseline must be a project-owned file")
         self.blob = baseline.read_bytes()
-        require(digest(self.blob) == self.doc["baseline"]["sha256"] and len(self.blob) == self.doc["baseline"]["size"],
+        require(self.baseline_sha256 == self.doc["baseline"]["sha256"] and len(self.blob) == self.doc["baseline"]["size"],
                 "Baseline ROM has changed. Restore the original project baseline.", "BASELINE_CHANGED")
         self.profile = qualify(self.blob)
         self.arm9 = arm9_code(self.blob)
@@ -93,7 +138,9 @@ class Project:
         self._composing = False
         interiors.reset(self)
         self._context_cache, self._member_cache, self._composed_cache = {}, {}, None
+        self._snapshot_blob = None
         self._event_cache = {}
+        self._gameplay_archives, self._gameplay_names = {}, {}
         self.event_offset, raw = resource(self.blob, EVENT_ARCHIVE, 64)
         self.base_events = events(raw)
         self.maps = {index: self.member_data(index) for index in (4, 5)}
@@ -104,8 +151,21 @@ class Project:
         # Older projects remain byte-preserved on read; add the new state only on a write.
         self.doc.setdefault("placement_moves", {})
         self.doc.setdefault("map_edits", [])
+        # The validated composition is kept (it was discarded before, so the first
+        # read replayed every transaction a second time).
         self._validate_state(self.doc)
-        self._composed_cache = None
+        # Prop packages live beside project.json: verify them even when the composition
+        # came from the snapshot cache (a moved or partial project must not open silently).
+        self.__dict__.pop('_prop_packages', None)
+        if self._composed_cache is not None:
+            for aid, asset in custom_props.assets(self._composed_cache).items():
+                custom_props.verify_package(self, aid, asset['package'])
+            self.__dict__.pop('_ground_packages', None)
+            for mid, entry in ground_materials.materials(self._composed_cache).items():
+                ground_materials.verify_package(self, mid, entry['package'])
+            self.__dict__.pop('_pokemon_packages', None)
+            for key, entry in pokemon_packages.packages(self._composed_cache).items():
+                pokemon_packages.verify_package(self, key, entry['package'])
         require(isinstance(self.doc.get('redo', []), list), 'Invalid redo history')
 
     def clone(self, root, name=None):
@@ -116,6 +176,9 @@ class Project:
             root.mkdir(parents=True, exist_ok=False)
             try:
                 (root / 'baseline.nds').write_bytes(self.blob)
+                if (self.root / 'assets').is_dir():
+                    # Project-owned prop packages travel with the project (content-addressed).
+                    shutil.copytree(self.root / 'assets', root / 'assets')
                 doc = copy.deepcopy(self.doc)
                 if name is not None:
                     require(isinstance(name, str) and 0 < len(name) <= 160, 'Invalid project name')
@@ -144,19 +207,58 @@ class Project:
     def context(self, header=None, matrix=None, cell=None):
         """Explicit map context: resource member plus matrix-cell origin."""
         if not self._composing and self._composed_cache is None and any(
-                t.get('schema') == interiors.SCHEMA for t in self.doc.get('map_edits', [])):
+                t.get('schema') in (interiors.SCHEMA, *world_authoring.SCHEMAS) for t in self.doc.get('map_edits', [])):
             self.composed()
         key = (header, matrix, tuple(cell) if cell is not None else None)
         if key not in self._context_cache:
             self._context_cache[key] = world.resolve_context(
                 self.blob, header=header, matrix=matrix, cell=cell, arm9=self.arm9,
-                matrix_reader=self.matrix_data, map_reader=self.member_raw)
-        return copy.deepcopy(self._context_cache[key])
+                matrix_reader=self.matrix_data, map_reader=self.member_raw, header_reader=self.header)
+        return _clone(self._context_cache[key])
 
     def matrix_data(self, matrix_id):
         if matrix_id in self._room_matrices:
             return world.decode_matrix(self._room_matrices[matrix_id], matrix_id)
         return world.read_matrix(self.blob, matrix_id)
+
+    # ---- composed headers and resources ----------------------------------------
+
+    def header(self, header_id):
+        """A stock header (with interior rebinding) or a created header."""
+        if not self._composing and self._composed_cache is None and any(
+                t.get('schema') in world_authoring.SCHEMAS for t in self.doc.get('map_edits', [])):
+            self.composed()
+        return world.read_header(self.blob, header_id, self.arm9, self._world_headers)
+
+    def header_count(self):
+        if not self._composing and self._composed_cache is None and any(
+                t.get('schema') in world_authoring.SCHEMAS for t in self.doc.get('map_edits', [])):
+            self.composed()
+        return world.header_count(self.blob) + len(self._world_headers)
+
+    def world_signature(self):
+        """Cache key for header-derived indexes: ARM9 rebinding plus created headers."""
+        arm9 = self.arm9
+        cached = getattr(self, '_arm9_digest_cache', None)
+        if cached is None or cached[0] is not arm9 or type(arm9) is not bytes:
+            cached = self._arm9_digest_cache = (arm9, digest(arm9))
+        return (cached[1], tuple((h, v['raw']) for h, v in sorted(self._world_headers.items())))
+
+    def resource(self, archive, member):
+        """(ROM offset or -1, bytes) of a stock or project-created archive member."""
+        if archive == world.MAP_ARCHIVE and member in self._room_members:
+            return -1, self._room_members[member]
+        if archive == world.MATRIX_ARCHIVE and member in self._room_matrices:
+            return -1, self._room_matrices[member]
+        if (archive, member) in self._world_members:
+            return -1, self._world_members[(archive, member)]
+        return resource(self.blob, archive, member)
+
+    def created_member(self, archive, member):
+        return (archive, member) in self._world_members
+
+    def world_areas(self):
+        return world_authoring.view(self)
 
     def contexts(self, matrix=None, map_member=None, header=None, search=None, limit=40, offset=0):
         """List matrices, or the populated cells of one matrix. No full enumeration.
@@ -170,7 +272,7 @@ class Project:
                 "Use a limit of 1..400 and a non-negative offset")
         require(search is None or isinstance(search, str), "Search term must be text")
         if matrix is None and header is not None:
-            matrix = world.read_header(self.blob, header, self.arm9)["matrix"]
+            matrix = self.header(header)["matrix"]
         if matrix is None:
             total = world.member_count(self.blob, world.MATRIX_ARCHIVE) + len(self._room_matrices)
             listed = []
@@ -196,10 +298,11 @@ class Project:
             self._header_names = [table[i * world.NAME_LENGTH:(i + 1) * world.NAME_LENGTH]
                                   .split(b"\x00")[0].decode("ascii", errors="replace").strip()
                                   for i in range(count)]
+            self._header_names += [self._world_headers[h]['name'] for h in sorted(self._world_headers)]
         for cell in cells:
             header = cell["header"]
             cell["name"] = (self._header_names[header] if header is not None and header < len(self._header_names)
-                            else world.header_name(self.blob, header) if header is not None else None)
+                            else self.header(header)['name'] if header is not None else None)
         if search:
             term = search.strip().lower()
             cells = [c for c in cells
@@ -254,104 +357,213 @@ class Project:
                     "interactions": interactions, "objects": {}, "structural_members": set()}
         event_authoring.initialise(self, composed, state["positions"])
         for index, transaction in enumerate(edits):
-            require(isinstance(transaction, dict), 'Invalid map transaction', 'INVALID_INPUT')
-            if transaction.get('schema') == story_authoring.SCHEMA:
-                story_authoring.replay(self, composed, transaction, index)
-                continue
-            if transaction.get('schema') == interiors.SCHEMA:
-                interiors.replay(self, composed, transaction, index)
-                continue
-            if transaction.get('schema') == linked_groups.SCHEMA:
-                linked_groups.replay(self, composed, transaction, index)
-                continue
-            if transaction.get('schema') in surface_authoring.SCHEMAS:
-                surface_authoring.replay(self, composed, transaction, index)
-                continue
-            if transaction.get('schema') in simple_interactions.SCHEMAS:
-                simple_interactions.replay(self, composed, transaction, index)
-                continue
-            if event_authoring.is_transaction(transaction):
-                event_authoring.replay(self, composed, transaction, index)
-                continue
-            if scenery.is_transaction(transaction):
-                scenery.replay(self, composed, transaction, index)
-                continue
-            authoring.require_shape(transaction)
-            require(transaction["index"] == index, "Authored transactions were reordered", "STALE_EDIT")
-            ref = transaction["context"]
-            context = self.context(header=ref["header"], cell=list(ref["cell"]))
-            require(context["map_member"] == ref["map_member"] and list(context["origin"]) == list(ref["origin"])
-                    and context["matrix"]["id"] == ref["matrix"] and context["id"] == ref["id"],
-                    "This map context no longer resolves to the authored cell", "CONTEXT_MISMATCH")
-            expected = authoring.dependencies(context, index)
-            require(transaction["dependencies"] == expected
-                    and transaction["dependencies_sha256"] == authoring.canonical(expected),
-                    "Authored transaction dependencies changed", "UNQUALIFIED_DEPENDENCIES")
-            _require_disjoint(authoring.transaction_domain(transaction), legacy_owned)
-            member = context["map_member"]
-            raw = self.member_raw(member)
-            _, props, _ = self.member_data(member)
-            for change in transaction["placements"]:
-                slot = change["slot"]
-                require(type(slot) is int and 0 <= slot < len(props),
-                        f"No placement {member}:{slot} in this map context", "NOT_FOUND")
-                if member in composed["objects"]:
-                    require(slot in composed["objects"][member], "Object was removed or transferred", "NOT_FOUND")
-                # Everything the patch is derived from is checked against the resolved slot.
-                authoring.require_record_identity(change, props[slot], context)
-                current = placements.get((member, slot), authoring.record_state(props[slot]))
-                require(change["record_before"] == current,
-                        "Placement before-value differs", "BEFORE_VALUE_MISMATCH")
-                require(change["before"] == authoring.global_from_record(context, change["record_before"])
-                        and change["after"] == authoring.global_from_record(context, change["record_after"]),
-                        "Placement anchors disagree with their records", "BEFORE_VALUE_MISMATCH")
-                authoring.require_anchor(context, change["after"])
-                placements[(member, slot)] = change["record_after"]
-                generic["placements"][(member, slot)] = change["record_after"]
-                if member in composed["objects"]:
-                    obj = composed["objects"][member][slot]
-                    data = bytearray(obj["raw"])
-                    struct.pack_into("<3i", data, 4, *(change["record_after"][a] for a in ("x", "y", "z")))
-                    obj["raw"] = bytes(data)
-            for cell in transaction["permissions"]:
-                authoring.require_cell_bounds(cell, context)
-                offset = cell["offset"]
-                current = permissions.get((member, offset), raw[offset:offset + 2])
-                require(cell["before"] == current.hex(),
-                        f"Permission cell {cell['x']},{cell['z']} is {current.hex()}, not {cell['before']}",
-                        "BEFORE_VALUE_MISMATCH")
-                after = bytes.fromhex(cell["after"])
-                require(after != current, "Empty permission change", "UNSUPPORTED_EDIT")
-                permissions[(member, offset)] = after
-                generic["permissions"][(member, offset)] = after
-            if "sign_interaction" in transaction:
-                expected_sign = sign_interaction.plan(self, context, placements, interactions)
-                require(expected_sign is not None and transaction["sign_interaction"] == expected_sign,
-                        "Sign interaction before-values, target or dependencies changed", "BEFORE_VALUE_MISMATCH")
-                interactions[(expected_sign["event_member"], expected_sign["event_id"])] = bytes.fromhex(expected_sign["after"])
-                composed["event_records"][(expected_sign["event_member"], expected_sign["record_offset"])] = bytes.fromhex(expected_sign["after"])
-            contexts.append(context)
+            self._replay_transaction(composed, transaction, index)
         return composed
+
+    def _replay_transaction(self, composed, transaction, index):
+        """Replay one stored transaction onto a composed state (in stored order)."""
+        # Planners that qualify references (custom Pokémon identities) read the state being composed.
+        self._replaying = composed
+        placements, permissions, generic = composed['placements'], composed['permissions'], composed['generic']
+        interactions, contexts = composed['interactions'], composed['contexts']
+        require(isinstance(transaction, dict), 'Invalid map transaction', 'INVALID_INPUT')
+        if transaction.get('schema') in world_authoring.SCHEMAS:
+            world_authoring.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') in gameplay.SCHEMAS:
+            gameplay.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') in game_data.SCHEMAS:
+            game_data.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') in story_authoring.SCHEMAS:
+            story_authoring.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') == interiors.SCHEMA:
+            interiors.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') == linked_groups.SCHEMA:
+            linked_groups.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') in surface_authoring.SCHEMAS:
+            surface_authoring.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') in terrain_authoring.SCHEMAS:
+            terrain_authoring.replay(self, composed, transaction, index)
+            return
+        if transaction.get('schema') in simple_interactions.SCHEMAS:
+            simple_interactions.replay(self, composed, transaction, index)
+            return
+        if event_authoring.is_transaction(transaction):
+            event_authoring.replay(self, composed, transaction, index)
+            return
+        if custom_props.is_transaction(transaction):
+            custom_props.replay(self, composed, transaction, index)
+            return
+        if ground_materials.is_transaction(transaction):
+            ground_materials.replay(self, composed, transaction, index)
+            return
+        if ground_decals.is_transaction(transaction):
+            ground_decals.replay(self, composed, transaction, index)
+            return
+        if travel_points.is_transaction(transaction):
+            travel_points.replay(self, composed, transaction, index)
+            return
+        if field_features.is_transaction(transaction):
+            field_features.replay(self, composed, transaction, index)
+            return
+        if petal_effect.is_transaction(transaction):
+            petal_effect.replay(self, composed, transaction, index)
+            return
+        if runtime_repairs.is_transaction(transaction):
+            runtime_repairs.replay(self, composed, transaction, index)
+            return
+        if pokemon_packages.is_transaction(transaction):
+            pokemon_packages.replay(self, composed, transaction, index)
+            return
+        if map_groups.is_transaction(transaction):
+            map_groups.replay(self, composed, transaction, index)
+            return
+        if environments.is_transaction(transaction):
+            environments.replay(self, composed, transaction, index)
+            return
+        if scenery.is_transaction(transaction):
+            scenery.replay(self, composed, transaction, index)
+            return
+        authoring.require_shape(transaction)
+        require(transaction["index"] == index, "Authored transactions were reordered", "STALE_EDIT")
+        ref = transaction["context"]
+        context = self.context(header=ref["header"], cell=list(ref["cell"]))
+        require(context["map_member"] == ref["map_member"] and list(context["origin"]) == list(ref["origin"])
+                and context["matrix"]["id"] == ref["matrix"] and context["id"] == ref["id"],
+                "This map context no longer resolves to the authored cell", "CONTEXT_MISMATCH")
+        expected = authoring.dependencies(context, index)
+        require(transaction["dependencies"] == expected
+                and transaction["dependencies_sha256"] == authoring.canonical(expected),
+                "Authored transaction dependencies changed", "UNQUALIFIED_DEPENDENCIES")
+        _require_disjoint(authoring.transaction_domain(transaction), composed['legacy_domain'])
+        member = context["map_member"]
+        raw = self.member_raw(member)
+        _, props, _ = self.member_data(member)
+        for change in transaction["placements"]:
+            slot = change["slot"]
+            require(type(slot) is int and 0 <= slot < len(props),
+                    f"No placement {member}:{slot} in this map context", "NOT_FOUND")
+            if member in composed["objects"]:
+                require(slot in composed["objects"][member], "Object was removed or transferred", "NOT_FOUND")
+            # Everything the patch is derived from is checked against the resolved slot.
+            authoring.require_record_identity(change, props[slot], context)
+            current = placements.get((member, slot), authoring.record_state(props[slot]))
+            require(change["record_before"] == current,
+                    "Placement before-value differs", "BEFORE_VALUE_MISMATCH")
+            require(change["before"] == authoring.global_from_record(context, change["record_before"])
+                    and change["after"] == authoring.global_from_record(context, change["record_after"]),
+                    "Placement anchors disagree with their records", "BEFORE_VALUE_MISMATCH")
+            authoring.require_anchor(context, change["after"])
+            placements[(member, slot)] = change["record_after"]
+            generic["placements"][(member, slot)] = change["record_after"]
+            if member in composed["objects"]:
+                obj = composed["objects"][member][slot]
+                data = bytearray(obj["raw"])
+                struct.pack_into("<3i", data, 4, *(change["record_after"][a] for a in ("x", "y", "z")))
+                obj["raw"] = bytes(data)
+        owned = composed.get('prop_collision', {})
+        for cell in transaction["permissions"]:
+            authoring.require_cell_bounds(cell, context)
+            offset = cell["offset"]
+            require((member, offset) not in owned, f"Permission cell {cell['x']},{cell['z']} is owned by prop instance(s) "
+                    f"{owned.get((member, offset), {}).get('owners')}; edit the prop's collision instead", "COLLISION_CONFLICT")
+            current = permissions.get((member, offset), raw[offset:offset + 2])
+            require(cell["before"] == current.hex(),
+                    f"Permission cell {cell['x']},{cell['z']} is {current.hex()}, not {cell['before']}",
+                    "BEFORE_VALUE_MISMATCH")
+            after = bytes.fromhex(cell["after"])
+            require(after != current, "Empty permission change", "UNSUPPORTED_EDIT")
+            permissions[(member, offset)] = after
+            generic["permissions"][(member, offset)] = after
+        if "sign_interaction" in transaction:
+            expected_sign = sign_interaction.plan(self, context, placements, interactions)
+            require(expected_sign is not None and transaction["sign_interaction"] == expected_sign,
+                    "Sign interaction before-values, target or dependencies changed", "BEFORE_VALUE_MISMATCH")
+            interactions[(expected_sign["event_member"], expected_sign["event_id"])] = bytes.fromhex(expected_sign["after"])
+            composed["event_records"][(expected_sign["event_member"], expected_sign["record_offset"])] = bytes.fromhex(expected_sign["after"])
+        contexts.append(context)
+
+    def _append_composed(self, transaction):
+        """Extend a cached composition by one appended transaction (batch planning).
+
+        Equivalent to recomposing in stored order; plan_area_edit still validates the
+        whole final state from scratch before anything is saved.
+        """
+        if self._composed_cache is None:
+            return
+        self._snapshot_blob = None
+        self._composing = True
+        try:
+            self._replay_transaction(self._composed_cache, transaction, len(self.doc['map_edits']) - 1)
+        except BaseException:
+            self._composed_cache = None
+            raise
+        finally:
+            self._composing = False
 
     def composed(self):
         if self._composed_cache is None:
-            self._composed_cache = self._compose(self.doc)
+            blob = snapshots.lookup(snapshots.key(self, self.doc))
+            if blob is not None:
+                snapshots.restore(self, blob)
+            else:
+                self._composed_cache = self._compose(self.doc)
         return self._composed_cache
+
+    def _fork(self, doc=None):
+        """An isolated Project for trials: own registries, caches and composition.
+
+        copy.copy alone shares every registry dict with this Project, so a trial
+        could leak created headers or contexts into it (or the reverse).
+        """
+        trial = copy.copy(self)
+        trial.doc = self.doc if doc is None else doc
+        trial._composed_cache = None
+        trial._snapshot_blob = None
+        interiors.reset(trial)
+        trial._event_cache = {}
+        for name in snapshots.DERIVED:
+            trial.__dict__.pop(name, None)
+        return trial
 
     def _validate_state(self, state):
         # A proposed state needs its own runtime overlays and composed cache.
         # Validating a preview/undo snapshot must not change reads of self.doc.
-        target = self if state is self.doc else copy.copy(self)
-        return target._validate_composed_state(state)
+        # The copy keeps the full document (composition reads e.g. its baseline);
+        # only ``state`` is composed.
+        target = self if state is self.doc else self._fork()
+        name = snapshots.key(self, state)
+        blob = snapshots.lookup(name)
+        if blob is not None:
+            snapshots.restore(target, blob)
+            return target._composed_cache
+        composed = target._validate_composed_state(state)
+        target._snapshot_blob = snapshots.capture(target)
+        snapshots.store(name, target._snapshot_blob)
+        return composed
 
     def _validate_composed_state(self, state):
+        composed = self._compose(self._checked_moves(state))
+        self._composed_cache = composed
+        return self._validate_composition(state, composed)
+
+    def _checked_moves(self, state):
         moves = state.get("placement_moves", {})
         require(isinstance(moves, dict) and set(moves).issubset({DECORATION_KEY}),
                 "Only the qualified south planter translation is supported", "UNSUPPORTED_EDIT")
         if moves:
             self._placement_proof(moves)
-        composed = self._compose(state)
-        self._composed_cache = composed
+        return state
+
+    def _validate_composition(self, state, composed):
+        """Whole-state checks on a composition built in stored order (fully or
+        incrementally: both replay the same transactions with the same code)."""
         # An event-edited legacy NPC is validated at its composed position below.
         # Keeping the earlier legacy position here would create a phantom blocker.
         legacy_positions = {key: value for key, value in state["positions"].items()
@@ -361,6 +573,8 @@ class Project:
         simple_interactions.validate(self, composed)
         linked_groups.validate(self, composed)
         story_authoring.validate(self, composed)
+        gameplay.validate(self, composed)
+        world_authoring.validate(self, composed)
         return composed
 
     def _placement_proof(self, moves=None):
@@ -380,20 +594,49 @@ class Project:
         return proof
 
     def _snapshot(self, operation):
-        result = {"operation": operation, "positions": copy.deepcopy(self.doc["positions"]),
-                  "placement_moves": copy.deepcopy(self.doc["placement_moves"]),
-                  "map_edits": copy.deepcopy(self.doc["map_edits"])}
+        result = {"operation": operation, "positions": _clone(self.doc["positions"]),
+                  "placement_moves": _clone(self.doc["placement_moves"]),
+                  "map_edits": _clone(self.doc["map_edits"])}
         if "map_selection" in self.doc:
-            result["map_selection"] = copy.deepcopy(self.doc["map_selection"])
+            result["map_selection"] = _clone(self.doc["map_selection"])
         return result
+
+    @staticmethod
+    def _history_entry(snapshot, following):
+        """A history snapshot whose map edits are stored as a delta against the state
+        that follows it (kept prefix + tail): a stored edit list is no longer repeated
+        once per history entry. Undo expands only the newest entry, against the doc."""
+        edits, after = snapshot["map_edits"], following["map_edits"]
+        keep, limit = 0, min(len(edits), len(after))
+        while keep < limit and edits[keep] == after[keep]:
+            keep += 1
+        entry = {k: v for k, v in snapshot.items() if k != "map_edits"}
+        entry["map_edits_delta"] = {"keep": keep, "tail": edits[keep:]}
+        return entry
+
+    @staticmethod
+    def _expand_history(entry, following):
+        """Full snapshot of a stored history entry (legacy entries are already full)."""
+        if "map_edits_delta" not in entry:
+            return entry
+        delta = entry["map_edits_delta"]
+        require(isinstance(delta, dict) and set(delta) == {"keep", "tail"} and type(delta["keep"]) is int
+                and 0 <= delta["keep"] <= len(following["map_edits"]) and isinstance(delta["tail"], list)
+                and "map_edits" not in entry,
+                "Undo history differs from the current edits", "BEFORE_VALUE_MISMATCH")
+        full = {k: v for k, v in entry.items() if k != "map_edits_delta"}
+        full["map_edits"] = _clone(following["map_edits"][:delta["keep"]]) + _clone(delta["tail"])
+        return full
 
     def _commit(self, operation, changes):
         """One save unit: snapshot, apply, bump the revision, write atomically."""
-        self.doc["history"].append(self._snapshot(operation))
+        snapshot = self._snapshot(operation)
         self.doc.update(changes)
+        self.doc["history"].append(self._history_entry(snapshot, self.doc))
         self.doc.pop('redo', None)
         self.doc["revision"] += 1
-        self._composed_cache = None
+        self._composed_cache = self._snapshot_blob = None
+        interiors.reset(self)
         atomic_json(self.path, self.doc)
 
     @contextmanager
@@ -550,7 +793,7 @@ class Project:
                                "editable": not owned,
                                "locked_by": "qualified planter operation (undo it first)" if owned else None})
         ox, oz = context["origin"]
-        events_view = events(resource(self.blob, world.EVENT_ARCHIVE, context["event_member"])[1])
+        events_view = events(self.resource(world.EVENT_ARCHIVE, context["event_member"])[1])
         view = {"context": {k: context[k] for k in ("id", "name", "origin", "map_member", "map_archive",
                                                     "map_sha256", "event_member", "shared_cells", "resources")},
                 "header": {k: context["header"][k] for k in ("id", "name", "matrix", "area_data", "event_file",
@@ -620,9 +863,63 @@ class Project:
         require(isinstance(operations, list) and 1 <= len(operations) <= 64,
                 'An area edit needs 1..64 operations', 'INVALID_INPUT')
         require(label is None or isinstance(label, str) and 0 < len(label) <= 160, 'Invalid area label')
-        trial = copy.copy(self)
-        trial.doc = copy.deepcopy(self.doc)
-        trial._composed_cache = None
+        self.composed()
+        # Presets expand into the ordinary story operations an author could write by hand.
+        from . import presets
+        expanded = []
+        for operation in operations:
+            if (isinstance(operation, dict) and operation.get('kind') == 'environment'
+                    and isinstance(operation.get('request'), dict) and operation['request'].get('action') == 'place'):
+                # KIT-02: an environment preset placement is the ordinary operations it stands for.
+                require(set(operation) == {'kind', 'context', 'request'} and isinstance(operation['context'], dict),
+                        'Each operation needs kind, context and request', 'INVALID_INPUT')
+                expanded += environments.expand(self, operation['context'], operation['request'])
+            elif isinstance(operation, dict) and operation.get('kind') == 'preset':
+                require(set(operation) == {'kind', 'context', 'request'} and isinstance(operation['context'], dict),
+                        'Each operation needs kind, context and request', 'INVALID_INPUT')
+                expanded += presets.expand(self, operation['context'], operation['request'])
+            elif (isinstance(operation, dict) and operation.get('kind') == 'ground'
+                  and isinstance(operation.get('request'), dict) and 'source' in operation['request']):
+                # A ground-material register/revise may name its import folder: it is baked
+                # here (in memory) and becomes the ordinary package operation.
+                request = dict(operation['request'])
+                staged = ground_materials.stage(self, request.pop('source'))
+                require(set(request) <= {'action'} and request.get('action', staged['operation']['action'])
+                        == staged['operation']['action'], 'A staged ground import names only its source (and action)',
+                        'INVALID_INPUT')
+                expanded.append({**operation, 'request': staged['operation']})
+            elif (isinstance(operation, dict) and operation.get('kind') == 'prop'
+                  and isinstance(operation.get('request'), dict) and 'source' in operation['request']
+                  and operation['request'].get('action') in (None, 'register', 'revise')):
+                # A prop register/revise may name its import folder, like ground materials: baked
+                # here (in memory, staged for the commit) into the ordinary package operation.
+                request = dict(operation['request'])
+                staged = self.stage_prop_source(request.pop('source'))
+                require(set(request) <= {'action'} and request.get('action', staged['operation']['action'])
+                        == staged['operation']['action'], 'A staged prop import names only its source (and action)',
+                        'INVALID_INPUT')
+                require(not staged['unchanged'], f"Prop {staged['asset']} is unchanged", 'NO_CHANGE')
+                expanded.append({**operation, 'request': staged['operation']})
+            elif (isinstance(operation, dict) and operation.get('kind') == 'pokemon'
+                  and isinstance(operation.get('request'), dict) and 'source' in operation['request']):
+                # A Pokémon package import/revise may name its prepared folder: validated here
+                # (in memory) and turned into the ordinary package operation.
+                request = dict(operation['request'])
+                require(set(request) <= {'action', 'key', 'source', 'display', 'template', 'icon_palette'},
+                        'A staged Pokémon import names key, source, display, template and icon_palette',
+                        'INVALID_INPUT')
+                staged = pokemon_packages.stage(self, request['source'], request.get('key'), request.get('display'),
+                                                request.get('template'), request.get('icon_palette'))
+                require(request.get('action', staged['operation']['action']) == staged['operation']['action'],
+                        f"This package is a {staged['operation']['action']}", 'INVALID_INPUT')
+                expanded.append({**operation, 'request': staged['operation']})
+            else:
+                expanded.append(operation)
+        operations = expanded
+        # The trial starts from this Project's validated composition (a snapshot
+        # hit, not a replay) and composes only the new transactions in order.
+        trial = self._fork({**self.doc, 'map_edits': list(self.doc['map_edits'])})
+        snapshots.restore(trial, self._current_snapshot())
         start = len(trial.doc['map_edits'])
         for operation in operations:
             require(isinstance(operation, dict) and set(operation) == {'kind', 'context', 'request'},
@@ -633,10 +930,138 @@ class Project:
                     'Internal replay options are not authoring fields','INVALID_INPUT')
             state, index = trial.composed(), len(trial.doc['map_edits'])
             context = trial.context(**operation['context'])
+            if kind == 'border':
+                # A stock-bordered path or tall-grass patch: one surface transaction per
+                # touched cell (seam continuity), then each cell's behaviors.
+                from . import border_authoring
+                require(set(request) <= {'family', 'tiles', 'label', 'window', 'material', 'erase', 'behavior'},
+                        'Border fields are family, tiles, window, material, erase, behavior and label', 'INVALID_INPUT')
+                ground = border_authoring.behavior_of(request.get('family'), request.get('behavior'))
+                header = context['header']['id']
+                for cx, cy in border_authoring.touched_cells(trial, header, request.get('family'), request.get('tiles'),
+                                                             request.get('window'), trial.composed(),
+                                                             request.get('material'), request.get('erase', False)):
+                    cell_ctx = trial.context(header=header, cell=[cx, cy])
+                    t = border_authoring.plan(trial, cell_ctx, trial.composed(), len(trial.doc['map_edits']), **request)
+                    if border_authoring.changed(t):
+                        trial.doc['map_edits'].append(t)
+                        trial._append_composed(t)
+                # A paved terrace top or stair landing keeps the behavior its terrace gave it.
+                kept = set().union(*border_authoring.terrace_tiles(trial.composed(), header)[:2]) \
+                    if request.get('material') else set()
+                for (cx, cy), coords in sorted(border_authoring.interior_by_cell(request['tiles']).items()):
+                    coords = [c for c in coords if tuple(c) not in kept]
+                    if not coords:
+                        continue
+                    cell_ctx = trial.context(header=header, cell=[cx, cy])
+                    # 'path' is ordinary walkable ground (also for an erased patch or decorative grass);
+                    # 'grass' is encounter tall grass.
+                    spec = {'coords': coords, 'ground': ground, 'blocked': False, 'stamp': None,
+                            'decorative': request.get('behavior') == 'ground'}
+                    cells = world_authoring.terrain_permissions(trial, cell_ctx, trial.composed(), spec)
+                    if cells:
+                        t = trial.plan_map_edit(header=header, cell=[cx, cy], permissions=cells,
+                                                label=request.get('label') or 'Border behavior')['transaction']
+                        trial.doc['map_edits'].append(t)
+                        trial._append_composed(t)
+                continue
+            if kind == 'map_group' and request.get('action') in ('place', 'move', 'remove'):
+                # GROUP-01/02: a group copy/move/removal is the ordinary transaction of every
+                # element (objects, prop instances, tiles, signs/NPCs, entrance) plus one record.
+                ops, record = map_groups.expand(trial, context, state, request)
+                produced = []
+                for sub_kind, ref, sub in ops:
+                    sub_ctx = trial.context(header=ref['header'], cell=ref['cell'])
+                    sub_state, sub_index = trial.composed(), len(trial.doc['map_edits'])
+                    if sub_kind == 'scenery':
+                        t = scenery.plan(trial, sub_ctx, sub_state, sub_index, **sub)
+                    elif sub_kind == 'prop':
+                        t = custom_props.plan(trial, sub_ctx, sub_state, sub_index, **sub)
+                    elif sub_kind == 'interaction':
+                        t = simple_interactions.plan(trial, sub_ctx, sub_state, sub_index, **sub)
+                    elif sub_kind == 'world':
+                        t = world_authoring.plan(trial, sub_ctx, sub_state, sub_index, **sub)
+                    else:
+                        t = trial.plan_map_edit(header=ref['header'], cell=ref['cell'], permissions=sub['permissions'],
+                                                label=request.get('label') or 'Group tiles')['transaction']
+                    trial.doc['map_edits'].append(t)
+                    trial._append_composed(t)
+                    produced.append(sub_index)
+                name = request['name'] if request['action'] == 'place' else \
+                    map_groups.placed(state)[request['instance']]['template']
+                t = map_groups.plan(trial, context, trial.composed(), len(trial.doc['map_edits']), 'record', name=name,
+                                    label=request.get('label'), produced=produced, **record)
+                trial.doc['map_edits'].append(t)
+                trial._append_composed(t)
+                continue
+            if kind == 'world' and request.get('action') == 'trees':
+                # Decorative forest: one ordinary permission transaction per cell that still
+                # has Headbutt-behavior tiles; collision and visuals are unchanged.
+                from . import world_identity
+                area = world_identity.tree_request(state, request)
+                added = 0
+                for cell in area['cells']:
+                    cell_ctx = trial.context(header=area['header'], cell=cell['cell'])
+                    cells = world_identity.tree_cells(trial, cell_ctx, trial.composed(), request.get('retain') or [])
+                    if cells:
+                        t = trial.plan_map_edit(header=area['header'], cell=cell['cell'], permissions=cells,
+                                                label=request.get('label') or f"Decorative trees: {request['area']}")['transaction']
+                        trial.doc['map_edits'].append(t)
+                        trial._append_composed(t)
+                        added += 1
+                require(added, 'This area has no Headbutt-behavior trees left', 'NO_CHANGE')
+                continue
+            if kind == 'elevation':
+                # Terrain authoring v1: a terrace/pond is validated globally once, then one
+                # terrain transaction (model + height table) and one permission transaction
+                # per touched cell; ambient edits remove inherited sound plates in one cell.
+                spec = terrain_authoring.normalise(request)
+                header = context['header']['id']
+                if spec['action'] == 'ambient':
+                    cell_ctx = trial.context(header=header, cell=spec['cell'])
+                    t = terrain_authoring.plan_ambient(trial, cell_ctx, trial.composed(), len(trial.doc['map_edits']), spec)
+                    trial.doc['map_edits'].append(t)
+                    trial._append_composed(t)
+                    continue
+                feature = terrain_authoring.plan_feature(trial, trial.composed(), header, spec)
+                for cell, cell_ctx in sorted(feature['cells'].items()):
+                    t = terrain_authoring.plan_cell(trial, cell_ctx, trial.composed(), len(trial.doc['map_edits']),
+                                                    spec, feature['ground'], feature['report'])
+                    trial.doc['map_edits'].append(t)
+                    trial._append_composed(t)
+                for cell, cell_ctx in sorted(feature['cells'].items()):
+                    cells = terrain_authoring.permission_cells(trial, trial.composed(), cell_ctx, feature)
+                    if cells:
+                        t = trial.plan_map_edit(header=header, cell=list(cell), permissions=cells,
+                                                label=(spec.get('label') or spec['action'].title()) + ' collision')['transaction']
+                        trial.doc['map_edits'].append(t)
+                        trial._append_composed(t)
+                continue
+            if kind == 'terrain':
+                # Visible ground (surface v4), then collision/encounter behavior judged
+                # against the new visuals: two transactions, one atomic batch.
+                spec = world_authoring.terrain_request(trial, context, request)
+                if spec['surface']:
+                    t = surface_authoring.plan(trial, context, state, index, **spec['surface'], _version=4)
+                    if surface_authoring.changed(t):
+                        trial.doc['map_edits'].append(t)
+                        trial._append_composed(t)
+                if spec['ground'] is not None or spec['blocked'] is not None or spec['stamp']:
+                    cells = world_authoring.terrain_permissions(trial, context, trial.composed(), spec)
+                    if cells:
+                        t = trial.plan_map_edit(header=context['header']['id'],
+                                                cell=[context['cell']['x'], context['cell']['y']],
+                                                permissions=cells, label=spec['label'] or 'Terrain behavior')['transaction']
+                        trial.doc['map_edits'].append(t)
+                        trial._append_composed(t)
+                continue
             try:
-                if kind == 'story':
+                if kind == 'world':
+                    t = world_authoring.plan(trial, context, state, index, **request)
+                    changed = True
+                elif kind == 'story':
                     t = story_authoring.plan(trial, context, state, index, **request)
-                    changed = t['before'] != t['after']
+                    changed = story_authoring.changed(state, t)
                 elif kind == 'group':
                     t = linked_groups.plan(trial, context, state, index, **request)
                     changed = t['before'] != t['after']
@@ -649,6 +1074,42 @@ class Project:
                 elif kind == 'event':
                     t = event_authoring.plan(trial, context, state, index, **request)
                     changed = bool(t['changes'])
+                elif kind == 'gameplay':
+                    t = gameplay.plan_v3(trial, state, index, context['header']['id'], **request)
+                    changed = bool(t['changes'])
+                elif kind == 'data':
+                    t = game_data.plan(trial, context, state, index, **request)
+                    changed = bool(t['changes'])
+                elif kind == 'prop':
+                    t = custom_props.plan(trial, context, state, index, **request)
+                    changed = True
+                elif kind == 'ground':
+                    t = ground_materials.plan(trial, state, index, **request)
+                    changed = True
+                elif kind == 'travel':
+                    t = travel_points.plan(trial, state, index, **request)
+                    changed = True
+                elif kind == 'field':
+                    t = field_features.plan(trial, context, state, index, **request)
+                    changed = True
+                elif kind == 'petals':
+                    t = petal_effect.plan(trial, state, index, **request)
+                    changed = True
+                elif kind == 'repair':
+                    t = runtime_repairs.plan(trial, state, index, **request)
+                    changed = True
+                elif kind == 'pokemon':
+                    t = pokemon_packages.plan(trial, state, index, **request)
+                    changed = True
+                elif kind == 'map_group':
+                    t = map_groups.plan(trial, context, state, index, **request)
+                    changed = True
+                elif kind == 'environment':
+                    t = environments.plan(trial, state, index, **request)
+                    changed = True
+                elif kind == 'decal':
+                    t = ground_decals.plan(trial, context, state, index, **request)
+                    changed = t['model_before_sha256'] != t['model_after_sha256'] or t['before'] != t['after']
                 elif kind == 'surface':
                     t = surface_authoring.plan(trial, context, state, index, **request)
                     changed = surface_authoring.changed(t)
@@ -657,6 +1118,8 @@ class Project:
                     changed = t['before'] != t['after']
                 elif kind == 'map':
                     t = trial.plan_map_edit(**operation['context'], **request)['transaction']
+                    terrain_authoring.require_free(state, context['header']['id'],
+                                                   [(c['x'], c['z']) for c in t['permissions']], 'Permission edit')
                     changed = bool(t['placements'] or t['permissions'] or t.get('sign_interaction'))
                 else:
                     require(False, 'Unknown area operation', 'INVALID_INPUT')
@@ -664,24 +1127,52 @@ class Project:
                 raise EditorError('INVALID_INPUT', 'Invalid area operation fields') from exc
             if changed:
                 trial.doc['map_edits'].append(t)
-                trial._composed_cache = None
-        trial._validate_state(trial.doc)
+                trial._append_composed(t)
+            if kind == 'world' and request.get('action') == 'identity':
+                # Parented interiors follow their parent's marker, region and shared name in
+                # the same atomic batch (one ordinary identity transaction per child).
+                from . import world_identity
+                for child in world_identity.children(trial.composed(), request.get('area')):
+                    area = world_authoring.areas(trial.composed())[child]
+                    cell_ctx = trial.context(header=area['header'], cell=area['cells'][0]['cell'])
+                    try:
+                        t = world_identity.plan_identity(trial, cell_ctx, trial.composed(), len(trial.doc['map_edits']),
+                                                         area=child, parent=request['area'],
+                                                         label=f'Follow parent: {child}')
+                    except EditorError as exc:
+                        if exc.code != 'NO_CHANGE':
+                            raise
+                        continue
+                    trial.doc['map_edits'].append(t)
+                    trial._append_composed(t)
+        trial._validate_composition(trial._checked_moves(trial.doc), trial.composed())
+        trial._snapshot_blob = snapshots.capture(trial)
+        snapshots.store(snapshots.key(trial, trial.doc), trial._snapshot_blob)
         transactions = trial.doc['map_edits'][start:]
         return {'transactions': transactions, 'empty': not transactions, 'label': label or 'Area edit',
                 'preview': trial.diff()[len(self.diff()):]}
 
     def area_preview_project(self, plan):
-        trial = copy.copy(self)
-        trial.doc = copy.deepcopy(self.doc)
-        trial.doc['map_edits'].extend(copy.deepcopy(plan['transactions']))
-        trial._composed_cache = None
+        trial = self._fork({**self.doc, 'map_edits': self.doc['map_edits'] + copy.deepcopy(plan['transactions'])})
         trial._validate_state(trial.doc)
         return trial
+
+    def _current_snapshot(self):
+        """Snapshot bytes of this Project's current validated composition."""
+        blob = getattr(self, '_snapshot_blob', None)
+        if blob is None:
+            blob = snapshots.lookup(snapshots.key(self, self.doc))
+            if blob is None:
+                self._validate_state(self.doc)
+                blob = self._snapshot_blob
+            self._snapshot_blob = blob
+        return blob
 
     def apply_area_edit(self, expected_revision, **request):
         with self._locked(expected_revision):
             plan = self.plan_area_edit(**request)
             if not plan['empty']:
+                self._write_staged_packages(plan['transactions'])
                 self._commit('map.transaction', {'map_edits': self.doc['map_edits'] + plan['transactions']})
         return {'revision': self.doc['revision'], 'changed': not plan['empty'], 'preview': plan['preview']}
 
@@ -729,7 +1220,257 @@ class Project:
         return {'characters': story_authoring.character_rows(state),
                 'trainers': copy.deepcopy(story_authoring.catalog(state, 'trainer')),
                 'states': copy.deepcopy(story_authoring.catalog(state, 'state')),
-                'sequences': copy.deepcopy(story_authoring.catalog(state, 'sequence'))}
+                'sequences': copy.deepcopy(story_authoring.catalog(state, 'sequence')),
+                'stock_sprites': [{'stock_sprite': tag, 'name': v['name']} for tag, v in scene_authoring.STOCK_SPRITES.items()]
+                                 + [{'stock_sprite': e['sprite'], 'name': e['name']} for e in self.npc_appearances()]}
+
+    def capacity(self):
+        from . import capacity
+        return capacity.report(self)
+
+    def world_identity(self):
+        """Player-visible identity, Pokégear placement, parents, static forest cells and
+        remaining Headbutt-behavior tiles of every created area, plus valid values/limits."""
+        from . import world_identity
+        state = self.composed()
+        return {**world_identity.view(self, state), 'headbutt_tiles': world_identity.headbutt_tiles(self, state)}
+
+    def prop_view(self):
+        """Custom prop assets, placed instances and collision ownership (read-only)."""
+        return custom_props.view(self)
+
+    def _write_staged_packages(self, transactions):
+        """Write the content-addressed packages a committing batch registers or revises."""
+        for t in transactions:
+            if pokemon_packages.is_transaction(t) and t['action'] in ('import', 'revise'):
+                key = (t['request']['key'], t['request']['package'])
+                staged = pokemon_packages.pending(self).get(key)
+                if staged is not None:
+                    pokemon_packages.write_package(self, *key, staged['files'])
+                    pokemon_packages.pending(self).pop(key)
+                pokemon_packages.verify_package(self, *key)
+            for module, key_name in ((custom_props, 'asset'), (ground_materials, 'material')):
+                if module.is_transaction(t) and t['action'] in ('register', 'revise'):
+                    key = (t['request'][key_name], t['request']['package'])
+                    staged = module.pending(self).get(key)
+                    if staged is not None:
+                        module.write_package(self, *key, staged['files'])
+                        module.pending(self).pop(key)
+                    module.verify_package(self, *key)
+
+    def field_view(self):
+        """Placed native field-move features (whirlpools) and their crossings."""
+        return field_features.view(self.composed())
+
+    def environment_view(self):
+        """Reusable named environments: members with their package ids, presets and donors (KIT-02)."""
+        return environments.view(self, self.composed())
+
+    def map_group_view(self):
+        """Reusable group templates (shared vs copied report) and placed group instances (GROUP-01/02)."""
+        return map_groups.view(self.composed())
+
+    def pokemon_view(self):
+        """Imported Pokémon packages and their persistent form identities (POKE-01..04)."""
+        return pokemon_packages.view(self, self.composed())
+
+    def stage_pokemon_source(self, folder, key, display, template, icon_palette):
+        """Validate a prepared Pokémon package folder in memory (no writes); returns the operation."""
+        return pokemon_packages.stage(self, folder, key, display, template, icon_palette)
+
+    def repair_view(self):
+        """Qualified base-ROM repairs, whether this baseline supports them and which are applied."""
+        return runtime_repairs.view(self, self.composed())
+
+    def petal_view(self):
+        """Areas with airborne petals, their settings and derived runtime numbers (EFFECT-01)."""
+        return petal_effect.view(self, self.composed())
+
+    def travel_view(self):
+        """Authored respawn/Fly points: spawn IDs, flags, tiles and capacity (TRAVEL-01, FIELD-05)."""
+        return travel_points.view(self, self.composed())
+
+    def ground_view(self):
+        """Registered ground materials: package, roles, variants per area data and users."""
+        state = self.composed()
+        out = {}
+        for mid, entry in ground_materials.materials(state).items():
+            body = ground_materials.verify_package(self, mid, entry['package'])
+            out[mid] = {'display': body['display'], 'package': entry['package'], 'revision': entry['revision'],
+                        'roles': body['roles'], 'variants': body['variants'],
+                        'area_variants': entry.get('variants', {}), 'users': ground_materials.users(self, state, mid),
+                        'textures': {r: ground_materials.texture_name(mid, r) for r in body['roles']}}
+        return {'materials': out, 'shown_areas': ground_materials.shown_areas(self, state)}
+
+    def stage_ground_source(self, folder):
+        """Bake a ground-material folder in memory (no writes); returns the operation to apply."""
+        return ground_materials.stage(self, folder)
+
+    def stage_prop_source(self, folder):
+        """Bake an import/reimport folder in memory (no writes) and stage its package for
+        previews. Returns the package id, bake report and impact on existing instances."""
+        source = custom_props.load_source(folder)
+        sha, files, body = custom_props.package(source)
+        custom_props.pending(self)[(body['id'], sha)] = {'files': files, 'body': body}
+        state = self.composed(); registry = custom_props.assets(state)
+        current = registry.get(body['id'])
+        impact = sorted(k for k, i in custom_props.instances(state).items() if i['asset'] == body['id'])
+        return {'asset': body['id'], 'package': sha, 'report': body['report'], 'display': body['display'],
+                'collision': body['collision'], 'registered': current is not None,
+                'revision': current['revision'] if current else None,
+                'unchanged': bool(current and current['package'] == sha), 'affected_instances': impact,
+                'operation': ({'action': 'revise', 'asset': body['id'], 'package': sha, 'expected_revision': current['revision']}
+                              if current else {'action': 'register', 'asset': body['id'], 'package': sha})}
+
+    def plan_prop_edit(self, operations, label=None, context=None):
+        """Preview prop operations (register/revise/place/duplicate/move/remove/collision) as one batch."""
+        ctx = context or {'header': 67, 'cell': [17, 12]}
+        return self.plan_area_edit([{'kind': 'prop', 'context': op.get('context', ctx),
+                                     'request': {k: v for k, v in op.items() if k != 'context'}} for op in operations],
+                                   label or 'Custom props')
+
+    def apply_prop_edit(self, expected_revision, operations, label=None, context=None):
+        with self._locked(expected_revision):
+            plan = self.plan_prop_edit(operations, label, context)
+            if not plan['empty']:
+                for t in plan['transactions']:
+                    if t['action'] in ('register', 'revise'):
+                        key = (t['request']['asset'], t['request']['package'])
+                        staged = custom_props.pending(self).get(key)
+                        if staged is not None:
+                            custom_props.write_package(self, *key, staged['files'])
+                            custom_props.pending(self).pop(key)
+                        custom_props.verify_package(self, *key)
+                self._commit('map.transaction', {'map_edits': self.doc['map_edits'] + plan['transactions']})
+        return {'revision': self.doc['revision'], 'changed': not plan['empty'], 'preview': plan['preview']}
+
+    def terrain_view(self, header):
+        """Terrain authoring v1 inspect: family, limits, features and sound plates of an area."""
+        return terrain_authoring.view(self, header)
+
+    def runtime_report(self):
+        from . import capacity
+        return capacity.runtime_report(self)
+
+    def gameplay_data(self, header=34):
+        return gameplay.inspect(self, header)
+
+    def gameplay_areas(self, search='', offset=0, limit=40):
+        return gameplay.areas(self, search, offset, limit)
+
+    def gameplay_species(self, species, form=0):
+        return gameplay.species_data(self, species, form)
+
+    def gameplay_catalog(self, kind, search='', offset=0, limit=40):
+        return gameplay.catalog(self, kind, search, offset, limit)
+
+    def plan_gameplay_edit(self, operations, header=34):
+        t = gameplay.plan_v3(self, self.composed(), len(self.doc['map_edits']), header, operations)
+        if t['changes']:
+            self._validate_state({**self.doc, 'map_edits': self.doc['map_edits'] + [t]})
+        return {'transaction': t, 'preview': t['preview'], 'empty': not t['changes']}
+
+    def apply_gameplay_edit(self, expected_revision, **request):
+        with self._locked(expected_revision):
+            plan = self.plan_gameplay_edit(**request)
+            if not plan['empty']:
+                self._commit('map.transaction', {'map_edits': self.doc['map_edits'] + [plan['transaction']]})
+        return {'revision': self.doc['revision'], 'changed': not plan['empty'], 'preview': plan['preview']}
+
+    # Records are global; the transaction is anchored to Cherrygrove's stock context
+    # (every pinned-baseline project has it), as area-edit anchors any operation.
+    DATA_CONTEXT = {'header': 67, 'cell': [17, 12]}
+
+    def data_catalog(self, kind, search='', offset=0, limit=40):
+        return game_data.catalog(self, kind, search, offset, limit)
+
+    def data_record(self, kind, ident):
+        """Current decoded record plus the before_sha256 an edit must quote."""
+        state = self.composed()
+        require(kind in ('move', 'item', 'shop'), 'Record kind is move, item or shop', 'INVALID_INPUT')
+        if kind == 'shop':
+            row = next((r for r in game_data.shop_rows(self, state) if r['name'] == ident), None)
+            return {'kind': 'shop', 'name': ident, 'exists': row is not None, 'before': row['items'] if row else None,
+                    'record': row}
+        require(type(ident) is int, 'Choose a record ID', 'INVALID_INPUT')
+        path = game_data.MOVES if kind == 'move' else game_data.ITEMS
+        raw = game_data._members(self, state, path)(ident)
+        view = game_data.decode_move(raw) if kind == 'move' else game_data.decode_item(raw)
+        entry = (game_data.move_entry if kind == 'move' else game_data.item_entry)(self, state, ident)
+        return {'kind': kind, 'id': ident, 'name': entry['name'], 'supported': entry['supported'], 'reason': entry['reason'],
+                'record': view, 'before_sha256': digest(raw)}
+
+    def plan_data_edit(self, operations, label=None):
+        return self.plan_area_edit([{'kind': 'data', 'context': self.DATA_CONTEXT,
+                                     'request': {'operations': operations, 'label': label}}], label=label)
+
+    def apply_data_edit(self, expected_revision, operations, label=None):
+        return self.apply_area_edit(expected_revision, operations=[{'kind': 'data', 'context': self.DATA_CONTEXT,
+                                                                   'request': {'operations': operations, 'label': label}}],
+                                    label=label)
+
+    # ---- portability and checkpoints (RECOVERY-01/02), shared by UI and CLI ----
+    def package(self, output, include_baseline=False):
+        from . import recovery
+        return recovery.package(self, output, include_baseline)
+
+    def checkpoint(self, name, expected_revision, note=None):
+        from . import recovery
+        return recovery.checkpoint(self, name, expected_revision, note)
+
+    def checkpoints(self):
+        from . import recovery
+        return recovery.checkpoints(self)
+
+    def restore_checkpoint(self, name, expected_revision):
+        from . import recovery
+        return recovery.restore(self, name, expected_revision)
+
+    def coverage(self):
+        from . import coverage
+        return coverage.report(self)
+
+    # ---- workspace (WORKSPACE-01..03, ACCESS-01): read-only, shared by UI and CLI ----
+    def workspace_search(self, text='', kinds=None, limit=200):
+        from . import workspace
+        return workspace.search(self, text, kinds, limit)
+
+    def workspace_references(self, ref):
+        from . import workspace
+        return workspace.references(self, ref)
+
+    def progression(self):
+        from . import workspace
+        return workspace.progression(self)
+
+    def reach(self, header=None, x=None, z=None, save=None, surf=False, conditional=True):
+        from . import workspace, save_read
+        flags = ()
+        if save is not None:
+            found = save_read.read(save)
+            header, x, z, flags = found['header'], found['x'], found['z'], found['flags']
+        require(all(type(v) is int for v in (header, x, z)), 'Choose a start tile or a save', 'INVALID_INPUT')
+        result = workspace.reach(self, header, x, z, flags=flags, surf=surf, conditional=conditional)
+        if save is not None:
+            result['save'] = {k: v for k, v in found.items() if k != 'flags'} | {'flags_set': len(found['flags'])}
+        return result
+
+    def impact(self, operations, label=None):
+        from . import workspace
+        return workspace.impact(self, operations, label)
+
+    def scene_report(self, key):
+        """Read-only map-qualified beat trace, shared by the UI and agent CLI."""
+        state = self.composed()
+        spec = story_authoring.catalog(state, 'sequence').get(key)
+        require(spec is not None, 'Unknown scene', 'NOT_FOUND')
+        trace = []
+        scene_authoring.validate_routes(self, state, spec, state.get('scene_versions', {}).get(key, 1), trace)
+        routes = scene_authoring.gather_routes(self, state, spec)
+        return {'scene': key, 'revision': self.doc['revision'], 'context': spec['context'],
+                'directions': {'0':'north','1':'south','2':'west','3':'east'},
+                'approaches': {k:[{'start':list(p),'path':[list(q) for q in path]} for p,path in paths.items()] for k,paths in routes.items()},
+                'beats': trace, 'native_acceptance': 'not established by this report'}
 
     def character_package(self, key):
         package = story_authoring.catalog(self.composed(), 'character').get(key)
@@ -929,7 +1670,7 @@ class Project:
             if interaction is not None:
                 transaction.update(schema="sovereign-map-transaction-v2", version=2, sign_interaction=interaction)
         _require_disjoint(authoring.transaction_domain(transaction), composed["legacy_domain"])
-        events_view = events(resource(self.blob, world.EVENT_ARCHIVE, context["event_member"])[1])
+        events_view = events(self.resource(world.EVENT_ARCHIVE, context["event_member"])[1])
         preview = authoring.summarise(transaction, events_view, context)
         patches = authoring.patches(context, transaction)
         if transaction.get("sign_interaction"):
@@ -1010,11 +1751,13 @@ class Project:
                                   "editable": [DECORATION_KEY] if self.decoration_proof else []},
                 "map_authoring": {"schema": authoring.SCHEMA, "transactions": len(self.doc["map_edits"]),
                                   "supported_versions": [1, 2], "scenery_schema": scenery.SCHEMA, "event_schema": event_authoring.SCHEMA,
-                                  "contexts": sorted({t["context"]["id"] for t in self.doc["map_edits"]}),
+                                  # Project-wide transactions (e.g. prop register/revise) have no map context.
+                                  "contexts": sorted({t["context"]["id"] for t in self.doc["map_edits"] if t.get("context")}),
                                   "scope": "placement movement, scenery add/duplicate/delete/transfer, explicit permissions, existing NPC/background/warp editing and identified sign alignment"},
                 "capabilities": ["terrain-preview", "stock-model-preview", "placement-inspect", "event-inspect", "npc-1-move", "undo", "exact-rom-export",
                                  "map-context-select", "map-permission-inspect", "map-transaction-author",
-                                 "map-neighborhood", "new-bark-sign-align", "scenery-palette", "scenery-author", "structural-rom-export", "event-edit", "warp-connect"]
+                                 "map-neighborhood", "new-bark-sign-align", "scenery-palette", "scenery-author", "structural-rom-export", "event-edit", "warp-connect",
+                                 "gameplay-data", "gameplay-catalog", "gameplay-edit", "gameplay-areas", "gameplay-species"]
                                 + (["qualified-planter-move"] if self.decoration_proof else [])}
 
     def diff(self):
@@ -1032,7 +1775,13 @@ class Project:
                            "qualification": proof["id"],
                            "collision_flag_updates": sum(p["kind"] == "collision.flag" for p in proof["patches"])})
         for transaction in self.doc["map_edits"]:
-            if transaction.get('schema') == story_authoring.SCHEMA:
+            if transaction.get('schema') in world_authoring.SCHEMAS:
+                result.append(world_authoring.summary(transaction))
+                continue
+            if transaction.get('schema') in gameplay.SCHEMAS:
+                result.append(gameplay.summary(transaction))
+                continue
+            if transaction.get('schema') in story_authoring.SCHEMAS:
                 result.append(story_authoring.summary(transaction))
                 continue
             if transaction.get('schema') == interiors.SCHEMA:
@@ -1044,11 +1793,47 @@ class Project:
             if transaction.get('schema') in surface_authoring.SCHEMAS:
                 result.append(surface_authoring.summary(transaction))
                 continue
+            if transaction.get('schema') in terrain_authoring.SCHEMAS:
+                result.append(terrain_authoring.summary(transaction))
+                continue
             if transaction.get('schema') in simple_interactions.SCHEMAS:
                 result.append(simple_interactions.summary(transaction))
                 continue
+            if transaction.get('schema') in game_data.SCHEMAS:
+                result.append(game_data.summary(transaction))
+                continue
             if event_authoring.is_transaction(transaction):
                 result.append(event_authoring.summary(transaction))
+                continue
+            if custom_props.is_transaction(transaction):
+                result.append(custom_props.summary(transaction))
+                continue
+            if ground_materials.is_transaction(transaction):
+                result.append(ground_materials.describe(transaction))
+                continue
+            if ground_decals.is_transaction(transaction):
+                result.append(ground_decals.summary(transaction))
+                continue
+            if travel_points.is_transaction(transaction):
+                result.append(travel_points.summary(transaction))
+                continue
+            if field_features.is_transaction(transaction):
+                result.append(field_features.summary(transaction))
+                continue
+            if petal_effect.is_transaction(transaction):
+                result.append(petal_effect.summary(transaction))
+                continue
+            if runtime_repairs.is_transaction(transaction):
+                result.append(runtime_repairs.summary(transaction))
+                continue
+            if pokemon_packages.is_transaction(transaction):
+                result.append(pokemon_packages.summary(transaction))
+                continue
+            if map_groups.is_transaction(transaction):
+                result.append(map_groups.summary(transaction))
+                continue
+            if environments.is_transaction(transaction):
+                result.append(environments.summary(transaction))
                 continue
             if scenery.is_transaction(transaction):
                 result.append(scenery.summary(transaction))
@@ -1106,7 +1891,7 @@ class Project:
     def undo(self, expected_revision):
         with self._locked(expected_revision):
             require(bool(self.doc["history"]), "No edit to undo", "NO_UNDO")
-            previous = self.doc["history"][-1]
+            previous = self._expand_history(self.doc["history"][-1], self.doc)
             require(isinstance(previous, dict)
                     and previous.get("operation") in ("npc.move", "placement.move", "map.transaction"),
                     "Unknown undo operation", "UNSUPPORTED_EDIT")
@@ -1122,7 +1907,8 @@ class Project:
             else:
                 self.doc.pop("map_selection", None)
             self.doc["revision"] += 1
-            self._composed_cache = None
+            self._composed_cache = self._snapshot_blob = None
+            interiors.reset(self)
             atomic_json(self.path, self.doc)
         return {"revision": self.doc["revision"], "changes": self.diff()}
 
@@ -1137,18 +1923,20 @@ class Project:
             require(following.get('operation') in ('npc.move', 'placement.move', 'map.transaction'),
                     'Unknown redo operation', 'UNSUPPORTED_EDIT')
             self._validate_state(following)
-            self.doc['history'].append(self._snapshot(following['operation']))
+            current = self._snapshot(following['operation'])
             self.doc['redo'].pop()
             if not self.doc['redo']:
                 self.doc.pop('redo')
             for key in ('positions', 'placement_moves', 'map_edits'):
-                self.doc[key] = copy.deepcopy(following[key])
+                self.doc[key] = _clone(following[key])
+            self.doc['history'].append(self._history_entry(current, self.doc))
             if 'map_selection' in following:
-                self.doc['map_selection'] = copy.deepcopy(following['map_selection'])
+                self.doc['map_selection'] = _clone(following['map_selection'])
             else:
                 self.doc.pop('map_selection', None)
             self.doc['revision'] += 1
-            self._composed_cache = None
+            self._composed_cache = self._snapshot_blob = None
+            interiors.reset(self)
             atomic_json(self.path, self.doc)
         return {'revision': self.doc['revision'], 'changes': self.diff()}
 
@@ -1178,8 +1966,9 @@ class Project:
             require(not output.exists(), "Choose a new export folder; existing exports are preserved", "EXISTS")
             save = Path(save_path).read_bytes() if save_path else None
             require(save is None or len(save) == 524288, "Expected a 512 KiB ordinary HGSS save")
-            if any(scenery.is_transaction(t) or event_authoring.is_transaction(t) or
-                   t.get('schema') in (*surface_authoring.SCHEMAS, *simple_interactions.SCHEMAS, interiors.SCHEMA, linked_groups.SCHEMA, story_authoring.SCHEMA) for t in self.doc["map_edits"]):
+            if any(scenery.is_transaction(t) or event_authoring.is_transaction(t) or custom_props.is_transaction(t) or
+                   ground_materials.is_transaction(t) or ground_decals.is_transaction(t) or travel_points.is_transaction(t) or field_features.is_transaction(t) or petal_effect.is_transaction(t) or runtime_repairs.is_transaction(t) or pokemon_packages.is_transaction(t) or map_groups.is_transaction(t) or environments.is_transaction(t) or
+                   t.get('schema') in (*surface_authoring.SCHEMAS, *simple_interactions.SCHEMAS, interiors.SCHEMA, linked_groups.SCHEMA, *gameplay.SCHEMAS, *game_data.SCHEMAS, *story_authoring.SCHEMAS, *world_authoring.SCHEMAS) for t in self.doc["map_edits"]):
                 from .scenery_export import export
                 return export(self, output, save)
             data = bytearray(self.blob)

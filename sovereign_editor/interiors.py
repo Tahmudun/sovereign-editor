@@ -17,6 +17,9 @@ def reset(project):
     project._room_members = {}
     project._room_matrices = {}
     project._room_headers = {}
+    from . import world_authoring, terrain_authoring
+    world_authoring.reset(project)
+    terrain_authoring.reset(project)
     project._context_cache = {}
     project._member_cache = {}
     for key in ('_area_resource_users', '_library_source_cache', '_event_users'):

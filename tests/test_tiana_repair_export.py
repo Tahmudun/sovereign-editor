@@ -11,6 +11,7 @@ import pytest
 from sovereign_editor.core import Project
 from sovereign_editor.formats import EditorError, digest
 from sovereign_editor import battle_safety as safety, character_runtime as cr, dialogue_format as fmt, event_authoring as ev, story_authoring as story
+from historical import exported
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +42,7 @@ def test_repair_export_preservation_noop_stale_undo_redo(tmp_path):
     save = ROOT/'projects/tiana-events-1/exports/tiana-r26/game.sav'
     out = tmp_path/'first'; p.export(out,27,save)
     raw = (out/'game.nds').read_bytes();rom = ndspy.rom.NintendoDSRom(raw)
-    prior = ndspy.rom.NintendoDSRom((ROOT/'projects/tiana-events-1/exports/tiana-r26/game.nds').read_bytes())
+    prior = ndspy.rom.NintendoDSRom(exported(ROOT/'projects/tiana-events-1/exports/tiana-r26/game.nds'))
     allowed = {'a/0/1/2':856,'a/0/2/7':555,'a/0/3/2':69}
     # Battle repairs replace whole overlay files (002 before-move, 003 stat clamp).
     overlays = {cr.overlay(p.blob, i)['file_id']: repair(cr.overlay(p.blob, i)['data'])

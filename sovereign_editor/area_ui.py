@@ -159,7 +159,7 @@ class AreaEditor(QDialog):
         for label,value in [('Move','move'),('Copy','duplicate'),('Delete','delete'),('Transfer to neighbor','transfer')]:self.group_action.addItem(label,value)
         form.addRow('Action',self.group_action);self.dx=spin(-32,32,0);self.dz=spin(-32,32,0)
         form.addRow('Offset X',self.dx);form.addRow('Offset Z',self.dz)
-        self.destination_header=spin(0,world.header_count(self.project.blob)-1,self.context['header']);self.destination_cell=QLineEdit(','.join(map(str,self.context['cell'])))
+        self.destination_header=spin(0,self.project.header_count()-1,self.context['header']);self.destination_cell=QLineEdit(','.join(map(str,self.context['cell'])))
         form.addRow('Transfer header',self.destination_header);form.addRow('Transfer cell X,Z',self.destination_cell)
         self.objects=QListWidget();self.objects.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.objects.setMinimumHeight(170);box.addWidget(self.objects)

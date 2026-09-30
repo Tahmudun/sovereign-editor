@@ -40,12 +40,13 @@ AREA_TYPES = {0: "indoor", 1: "outdoor"}
 
 def header_count(blob):
     """Header count from the internal-name table; never a hardcoded map list."""
+    from .formats import _file_bounds
     try:
-        _, raw = span_named(blob, NAME_TABLE)
+        start, end = _file_bounds(blob, NAME_TABLE)
     except Exception:  # pragma: no cover - profile guard covers the US ROM
         return 0
-    require(len(raw) % NAME_LENGTH == 0, "Unsupported internal map-name table")
-    return len(raw) // NAME_LENGTH
+    require((end - start) % NAME_LENGTH == 0, "Unsupported internal map-name table")
+    return (end - start) // NAME_LENGTH
 
 
 def span_named(blob, name):
@@ -54,22 +55,34 @@ def span_named(blob, name):
 
 
 def header_name(blob, header_id):
-    _, raw = span_named(blob, NAME_TABLE)
-    chunk = span(raw, header_id * NAME_LENGTH, NAME_LENGTH)
+    from .formats import _file_bounds
+    start, end = _file_bounds(blob, NAME_TABLE)
+    require(header_id >= 0 and (header_id + 1) * NAME_LENGTH <= end - start, "Record exceeds container bounds")
+    chunk = blob[start + header_id * NAME_LENGTH:start + (header_id + 1) * NAME_LENGTH]
     return chunk.split(b"\x00")[0].decode("ascii", errors="replace").strip()
 
 
-def read_header(blob, header_id, arm9=None):
-    """HeaderHGSS: 24 bytes at ``HEADER_TABLE + id * 24`` of the decompressed ARM9."""
+def read_header(blob, header_id, arm9=None, created=None):
+    """HeaderHGSS: 24 bytes at ``HEADER_TABLE + id * 24`` of the decompressed ARM9.
+
+    ``created`` maps project-created header IDs (after the stock table) to their
+    ``raw`` record and internal ``name``; those live in the runtime extension.
+    """
+    if created and type(header_id) is int and header_id in created:
+        entry = created[header_id]
+        return decode_header(entry["raw"], header_id, entry["name"], None)
     code = arm9_code(blob) if arm9 is None else arm9
     count = header_count(blob)
     require(type(header_id) is int and 0 <= header_id < count,
-            f"Map header {header_id} is outside this ROM's header table (0..{count - 1})", "NOT_FOUND")
+            f"Map header {header_id} is outside this ROM's header table (0..{count - 1 + len(created or ())})", "NOT_FOUND")
     offset = HEADER_TABLE + header_id * HEADER_SIZE
-    raw = span(code, offset, HEADER_SIZE)
+    return decode_header(span(code, offset, HEADER_SIZE), header_id, header_name(blob, header_id), offset)
+
+
+def decode_header(raw, header_id, name, offset):
     (wild, area_data, coords, matrix, script, level_script, text_archive,
      music_day, music_night, event_file, location_name, area_properties, last32) = struct.unpack("<BBH7HBBI", raw)
-    return {"id": header_id, "name": header_name(blob, header_id), "hex": raw.hex(),
+    return {"id": header_id, "name": name, "hex": raw.hex(),
             "arm9_offset": offset, "wild_pokemon": wild, "area_data": area_data,
             "worldmap": {"unknown0": coords & 0xF, "x": (coords >> 4) & 0x3F, "y": (coords >> 10) & 0x3F},
             "matrix": matrix, "script_file": script, "level_script": level_script,
@@ -141,8 +154,43 @@ def matrix_cells(matrix, map_member=None):
     return cells
 
 
+# Packed identity fields of bytes 18..23 (pret include/map_header.h): name -> (byte offset,
+# bit shift, width, container size). Writes are masked, so every other bit keeps ``hex``.
+PACKED = {"location_name": (18, 0, 8, 2), "area_icon": (18, 8, 4, 2), "mom_call_intro": (18, 12, 4, 2),
+          "kanto": (20, 0, 1, 4), "weather": (20, 1, 7, 4), "location_type": (20, 8, 4, 4),
+          "camera_angle": (20, 12, 6, 4), "follow_mode": (20, 18, 2, 4), "battle_background": (20, 20, 5, 4),
+          "flags": (20, 25, 7, 4)}
+
+
+def encode_header(head):
+    """Inverse of decode_header: every decoded field is written with a masked store, so
+    unchanged fields (and any bit this decoder does not name) keep their ``hex`` bytes."""
+    raw = bytearray.fromhex(head["hex"])
+    require(len(raw) == HEADER_SIZE, "Map header records are 24 bytes")
+    for name, limit in (("wild_pokemon", 0xFF), ("area_data", 0xFF), ("matrix", 0xFFFF), ("script_file", 0xFFFF),
+                        ("level_script", 0xFFFF), ("text_archive", 0xFFFF), ("music_day", 0xFFFF),
+                        ("music_night", 0xFFFF), ("event_file", 0xFFFF)):
+        require(type(head[name]) is int and 0 <= head[name] <= limit, f"Header {name} is outside its field")
+    for axis in ("unknown0", "x", "y"):
+        width = 0xF if axis == "unknown0" else 0x3F
+        require(type(head["worldmap"][axis]) is int and 0 <= head["worldmap"][axis] <= width,
+                f"World-map {axis} is outside its 4/6-bit field")
+    coords = head["worldmap"]["unknown0"] | head["worldmap"]["x"] << 4 | head["worldmap"]["y"] << 10
+    struct.pack_into("<BBH7H", raw, 0, head["wild_pokemon"], head["area_data"], coords, head["matrix"],
+                     head["script_file"], head["level_script"], head["text_archive"], head["music_day"],
+                     head["music_night"], head["event_file"])
+    for name, (offset, shift, width, size) in PACKED.items():
+        value = int(head[name])
+        require(0 <= value < 1 << width, f"Header {name} needs {width} bits")
+        fmt = "<H" if size == 2 else "<I"
+        word = struct.unpack_from(fmt, raw, offset)[0]
+        mask = ((1 << width) - 1) << shift
+        struct.pack_into(fmt, raw, offset, (word & ~mask) | value << shift)
+    return bytes(raw)
+
+
 def resolve_context(blob, header=None, matrix=None, cell=None, arm9=None,
-                    matrix_reader=None, map_reader=None):
+                    matrix_reader=None, map_reader=None, header_reader=None):
     """Explicit context: resource member plus matrix-cell origin.
 
     Either a header id (whose matrix is followed) or an explicit matrix id must be
@@ -151,7 +199,8 @@ def resolve_context(blob, header=None, matrix=None, cell=None, arm9=None,
     """
     require(header is not None or matrix is not None,
             "Choose a map context by header id or matrix id", "CONTEXT_REQUIRED")
-    head = read_header(blob, header, arm9) if header is not None else None
+    reader = header_reader or (lambda h: read_header(blob, h, arm9))
+    head = reader(header) if header is not None else None
     matrix_id = head["matrix"] if head is not None else matrix
     require(matrix is None or head is None or matrix == matrix_id,
             f"Header {header} uses matrix {matrix_id}, not {matrix}", "CONTEXT_MISMATCH")
@@ -174,7 +223,7 @@ def resolve_context(blob, header=None, matrix=None, cell=None, arm9=None,
     header_id = header if header is not None else chosen["header"]
     require(header_id is not None,
             f"Matrix {matrix_id} carries no header section; pass an explicit header id", "CONTEXT_AMBIGUOUS")
-    head = head or read_header(blob, header_id, arm9)
+    head = head or reader(header_id)
     require(head["matrix"] == matrix_id, "Header/matrix disagreement", "CONTEXT_MISMATCH")
     member = chosen["map_member"]
     if map_reader:

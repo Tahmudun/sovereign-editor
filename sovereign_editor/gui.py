@@ -359,6 +359,9 @@ class EditorWindow(QMainWindow):
         file = self.menuBar().addMenu("File")
         for label, callback, shortcut in [("New project from ROM…", self.create_dialog, "Ctrl+N"),
                                           ("Open project…", self.open_dialog, "Ctrl+O"),
+                                          ("Open project package…", self.open_package_dialog, "Ctrl+Shift+O"),
+                                          ("Checkpoints and packages…", self.checkpoints_dialog, "Ctrl+Shift+K"),
+                                          ("Reuse content from another project…", self.reuse_dialog, "Ctrl+Shift+R"),
                                           ("Export ROM…", self.export_dialog, "Ctrl+E")]:
             action = QAction(label, self)
             action.setShortcut(QKeySequence(shortcut))
@@ -369,6 +372,13 @@ class EditorWindow(QMainWindow):
         inspector.setShortcut(QKeySequence("Ctrl+M"))
         inspector.triggered.connect(self.open_map_inspector)
         maps.addAction(inspector)
+        gameplay_action = QAction('Teams, encounters && species…', self)
+        gameplay_action.triggered.connect(self.open_gameplay)
+        maps.addAction(gameplay_action)
+        browser_action = QAction('Project browser…', self)
+        browser_action.setShortcut(QKeySequence('Ctrl+B'))
+        browser_action.triggered.connect(self.open_browser)
+        maps.addAction(browser_action)
         edit = self.menuBar().addMenu("Edit")
         undo = QAction("Undo", self)
         undo.setShortcut(QKeySequence.StandardKey.Undo)
@@ -647,6 +657,38 @@ class EditorWindow(QMainWindow):
             self.map_inspector.show()
         return self.map_inspector
 
+    def open_package_dialog(self):
+        from .recovery_ui import open_package
+        result = self.guard(lambda: open_package(self))
+        if result:
+            self.load_project(result['root'])
+
+    def reuse_dialog(self):
+        if not self.project:
+            self.notice("Open a project first.", True)
+            return
+        from .reuse_ui import ReuseDialog
+        self.guard(lambda: ReuseDialog(self.project, self).exec())
+        self.reload()
+
+    def checkpoints_dialog(self):
+        if not self.project:
+            self.notice("Open a project first.", True)
+            return
+        from .recovery_ui import CheckpointsDialog
+        self.guard(lambda: CheckpointsDialog(self.project, self, on_changed=self.reload).exec())
+
+    def open_browser(self):
+        inspector = self.open_map_inspector()
+        if inspector:
+            inspector.open_browser()
+
+    def open_gameplay(self):
+        if self.project:
+            from .gameplay_ui import GameplayEditor
+            self.guard(lambda: GameplayEditor(self.project, self).exec())
+            self.reload()
+
     def validate(self):
         if self.project:
             result = self.guard(self.project.validate)
@@ -738,11 +780,49 @@ QMenu::item:selected { background: #426358; }
 """
 
 
-def launch(project=None, map_inspector=False):
+def _smoke(app, windows):
+    """Launch report for release checks: which build and platform actually started."""
+    import json, platform, time
+    from PySide6 import __version__ as pyside
+    from PySide6.QtCore import qVersion
+    from . import __file__ as package_file, snapshots
+    start = time.time()
+    while time.time() - start < 1.0:
+        app.processEvents()
+        time.sleep(0.02)
+    report = {'ok': all(w.isVisible() for w in windows), 'platform': app.platformName(), 'qt': qVersion(),
+              'pyside': pyside, 'python': platform.python_version(), 'machine': platform.machine(),
+              'macos': platform.mac_ver()[0], 'package': str(Path(package_file).parent), 'executable': sys.executable,
+              'code_fingerprint': snapshots.CODE, 'windows': [w.windowTitle() for w in windows]}
+    project = next((getattr(w, 'project', None) for w in windows if getattr(w, 'project', None)), None)
+    if project is not None:
+        report['project'] = {'root': str(project.root), 'revision': project.doc['revision']}
+    for w in windows:
+        w.close()
+    print(json.dumps(report), flush=True)
+    return 0 if report['ok'] else 1
+
+
+def launch(project=None, map_inspector=False, gameplay=False, smoke=False):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Sovereign Editor")
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
+    if smoke:
+        windows = []
+        if map_inspector:
+            from .map_inspector import MapInspectorWindow
+            windows.append(MapInspectorWindow(project))
+        else:
+            windows.append(EditorWindow(project))
+        for w in windows:
+            w.show()
+        return _smoke(app, windows)
+    if gameplay:
+        from .gameplay_ui import GameplayEditor
+        editor = GameplayEditor(Project(project))
+        editor.show()
+        return app.exec()
     if map_inspector:
         from .map_inspector import MapInspectorWindow
         inspector = MapInspectorWindow(project)
